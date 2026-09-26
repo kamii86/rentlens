@@ -1,0 +1,25 @@
+[project]
+name = "rentlens"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "kamii86", email = "camilnu12345@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+rentlens = "rentlens:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+web = [
+    "asyncpg>=0.31.0",
+    "fastapi>=0.141.1",
+    "sqlalchemy>=2.1.1",
+    "uvicorn[standard]>=0.54.0",
+]
