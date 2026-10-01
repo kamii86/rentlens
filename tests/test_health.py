@@ -19,6 +19,7 @@ async def test_healthz() -> None:
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
+
 @pytest.mark.asyncio
 async def test_version() -> None:
     transport = ASGITransport(app=app)
@@ -31,6 +32,7 @@ async def test_version() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"version": __version__}
+
 
 @pytest.mark.asyncio
 async def test_health_database_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,6 +61,7 @@ async def test_health_database_unavailable(monkeypatch: pytest.MonkeyPatch) -> N
     assert response.json()["status"] == "error"
     assert response.json()["components"]["postgresql"]["status"] == "error"
     assert response.json()["components"]["postgresql"]["version"] is None
+
 
 @pytest.mark.asyncio
 async def test_health_database_available(monkeypatch: pytest.MonkeyPatch) -> None:

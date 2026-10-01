@@ -43,7 +43,7 @@ async def health(response: Response) -> dict:
     except Exception:
         response_time_ms = round((perf_counter() - start) * 1000, 2)
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        
+
         return {
             "status": "error",
             "components": {
