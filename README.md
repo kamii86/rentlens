@@ -151,7 +151,7 @@ DATABASE_URL=postgresql+asyncpg://username@localhost:5432/rentlens
 Запуск приложения:
 
 ```bash
-uv run uvicorn rentlens.main:app --reload
+uv run uvicorn rentlens.main:app --reload --app-dir src
 ```
 
 После запуска приложение доступно по адресу:
