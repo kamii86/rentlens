@@ -1,3 +1,4 @@
+import logging
 from time import perf_counter
 
 from fastapi import APIRouter, Response, status
@@ -7,6 +8,7 @@ from rentlens.database import engine
 from rentlens.version import __version__
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/healthz")
@@ -30,6 +32,11 @@ async def health(response: Response) -> dict:
 
         response_time_ms = round((perf_counter() - start) * 1000, 2)
 
+        logger.info(
+            "postgresql_healthcheck_success response_time_ms=%s",
+            response_time_ms,
+        )
+
         return {
             "status": "ok",
             "components": {
@@ -42,6 +49,12 @@ async def health(response: Response) -> dict:
         }
     except Exception:
         response_time_ms = round((perf_counter() - start) * 1000, 2)
+
+        logger.exception(
+            "postgresql_healthcheck_failed response_time_ms=%s",
+            response_time_ms,
+        )
+
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
         return {
