@@ -1,0 +1,16 @@
+{
+  "model": "RandomForestRegressor",
+  "model_uri": "models:/m-27ab6a1283b0487b933a09a03e8b2ff6",
+  "training_run_id": "2a4e0641af254ee1b91058b515434757",
+  "evaluation_run_id": "692446b29d154a678cd647eed67272bf",
+  "validation_mae": 204.06324612290257,
+  "test_rows": 14910,
+  "source_sha256": "b80c45a3e4b2f7a01f90d0320678ca40b47f76d97404ff2494d77f1179121cbf",
+  "test_sha256": "888b57f8657a24388b1ae011903b1e6d9ac85b6c9c4c5938e24cfc6d0e64c663",
+  "metrics": {
+    "test_mae": 204.7307701982921,
+    "test_rmse": 416.5674082618355,
+    "test_r2": 0.7765207036817954,
+    "test_prediction_seconds": 0.08221987495198846
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "primary_model": "RandomForestRegressor",
+  "models": [
+    {
+      "name": "LinearRegression",
+      "role": "baseline",
+      "run_id": "17f78c671a014dd89844b128cb058af6",
+      "model_id": "m-6c0fb01254bc4e32b2f52bc93a8a0e62",
+      "model_uri": "models:/m-6c0fb01254bc4e32b2f52bc93a8a0e62",
+      "validation_mae": 275.72830285286517,
+      "source_sha256": "b80c45a3e4b2f7a01f90d0320678ca40b47f76d97404ff2494d77f1179121cbf"
+    },
+    {
+      "name": "RandomForestRegressor",
+      "role": "primary",
+      "run_id": "2a4e0641af254ee1b91058b515434757",
+      "model_id": "m-27ab6a1283b0487b933a09a03e8b2ff6",
+      "model_uri": "models:/m-27ab6a1283b0487b933a09a03e8b2ff6",
+      "validation_mae": 204.06324612290257,
+      "source_sha256": "b80c45a3e4b2f7a01f90d0320678ca40b47f76d97404ff2494d77f1179121cbf"
+    },
+    {
+      "name": "CatBoostRegressor",
+      "role": "alternative",
+      "run_id": "a7c601d5c8834759ad0dc73db32f8941",
+      "model_id": "m-4a4e4185c03c46e09a7eb631c7766a80",
+      "model_uri": "models:/m-4a4e4185c03c46e09a7eb631c7766a80",
+      "validation_mae": 208.59724155279972,
+      "source_sha256": "b80c45a3e4b2f7a01f90d0320678ca40b47f76d97404ff2494d77f1179121cbf"
+    }
+  ]
+}
