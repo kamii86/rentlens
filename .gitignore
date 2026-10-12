@@ -38,3 +38,12 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+
+# ML datasets
+/data/raw/
+/data/processed/
+
+# Generated predictions and local MLflow stores
+/reports/test_predictions.csv
+/mlruns/
+/mlartifacts/

@@ -24,16 +24,73 @@ services:
           cpus: "1.0"
           memory: 512M
 
+  mlflow-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: mlflow
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: ${MLFLOW_DB_PASSWORD}
+    volumes:
+      - mlflow_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlflow -d mlflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    command:
+      - mlflow
+      - server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --allowed-hosts
+      - "localhost:*,127.0.0.1:*,mlflow:5000"
+      - --backend-store-uri
+      - postgresql+psycopg2://mlflow:${MLFLOW_DB_PASSWORD}@mlflow-db:5432/mlflow
+      - --serve-artifacts
+      - --artifacts-destination
+      - /mlflow/artifacts
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3).close()"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    depends_on:
+      mlflow-db:
+        condition: service_healthy
+    restart: unless-stopped
+
   app:
     build:
       context: .
       dockerfile: Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://rentlens:rentlens@db:5432/rentlens
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_MODEL_NAME: rentlens-price
+      MLFLOW_MODEL_ALIAS: champion
     ports:
       - "8000:8000"
     depends_on:
       db:
+        condition: service_healthy
+      mlflow:
         condition: service_healthy
     restart: unless-stopped
     logging:
@@ -49,3 +106,5 @@ services:
 
 volumes:
   postgres_data:
+  mlflow_postgres_data:
+  mlflow_artifacts:

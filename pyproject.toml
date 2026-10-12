@@ -7,7 +7,13 @@ authors = [
     { name = "kamii86", email = "camilnu12345@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "catboost>=1.2.10",
+    "matplotlib>=3.11.2",
+    "mlflow-skinny==3.5.1",
+    "pandas>=3.0.6",
+    "scikit-learn>=1.9.1",
+]
 
 [project.scripts]
 rentlens = "rentlens:main"
