@@ -1,95 +1,94 @@
-from unittest.mock import Mock
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-import rentlens.main as main_module
-from rentlens.api.process import LoadedPriceModel
+import rentlens.api.tasks as tasks_api
+from rentlens.main import app
+from rentlens.task_broker import QueueFull
 
 
 @pytest.fixture
-def model_loader(monkeypatch: pytest.MonkeyPatch) -> Mock:
-    fake_model = Mock()
-    fake_model.predict.return_value = [1500.50]
+def api_mocks(monkeypatch):
+    publish = AsyncMock()
+    save = AsyncMock()
 
-    loaded = LoadedPriceModel(
-        model=fake_model,
-        name="rentlens-price",
-        version="1",
-        algorithm="RandomForestRegressor",
+    monkeypatch.setattr(
+        app.state,
+        "publisher",
+        SimpleNamespace(publish=publish),
+        raising=False,
     )
+    monkeypatch.setattr(tasks_api, "record_accepted", save)
 
-    loader = Mock(return_value=loaded)
-    monkeypatch.setattr(main_module, "load_price_model", loader)
-
-    return loader
+    return publish, save
 
 
-@pytest.mark.asyncio
-async def test_process_success_and_single_loading(model_loader: Mock) -> None:
-    app = main_module.app
-
-    async with main_module.lifespan(app):
-        transport = ASGITransport(app=app)
-
-        async with AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            payload = {
-                "square_feet": 900,
-                "bedrooms": 2,
-                "bathrooms": 1,
-                "latitude": 40.7128,
-                "longitude": -74.0060,
-                "cityname": "New York",
-                "state": "NY",
-                "pets_allowed": "Cats,Dogs",
-            }
-
-            for _ in range(2):
-                response = await client.post("/process", json=payload)
-
-                assert response.status_code == 200
-                assert response.json() == {
-                    "predicted_price": 1500.50,
-                    "currency": "USD",
-                    "price_type": "monthly",
-                    "model_name": "rentlens-price",
-                    "model_version": "1",
-                    "model_algorithm": "RandomForestRegressor",
-                }
-
-        model_loader.assert_called_once_with()
-        assert model_loader.return_value.model.predict.call_count == 2
-
-    assert app.state.price_model is None
+async def post_task(payload):
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        return await client.post(
+            "/api/v1/tasks",
+            json=payload,
+        )
 
 
 @pytest.mark.asyncio
-async def test_process_missing_optional_features(model_loader: Mock) -> None:
-    app = main_module.app
+async def test_task_accepted(api_mocks):
+    publish, save = api_mocks
 
-    async with main_module.lifespan(app):
-        transport = ASGITransport(app=app)
+    payload = {
+        "square_feet": 900,
+        "bedrooms": 2,
+        "bathrooms": 1,
+        "latitude": 40.7128,
+        "longitude": -74.006,
+        "cityname": "New York",
+        "state": "NY",
+        "pets_allowed": "Cats,Dogs",
+    }
 
-        async with AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            response = await client.post(
-                "/process",
-                json={"square_feet": 900},
-            )
+    response = await post_task(payload)
 
-        assert response.status_code == 200
+    assert response.status_code == 202
 
-        frame = model_loader.return_value.model.predict.call_args.args[0]
+    data = response.json()
 
-        assert frame["bedrooms"].isna().all()
-        assert frame["bathrooms"].isna().all()
-        assert frame["cityname"].iloc[0] == "unknown"
-        assert frame["state"].iloc[0] == "unknown"
+    assert data["status"] == "ACCEPTED"
+    assert data["status_url"] == (f"/api/v1/tasks/{data['task_id']}")
+
+    UUID(data["task_id"])
+
+    publish.assert_awaited_once()
+    save.assert_awaited_once()
+
+    assert publish.await_args.args[0] == data["task_id"]
+    assert save.await_args.args[0] == data["task_id"]
+
+
+@pytest.mark.asyncio
+async def test_missing_optional_features(api_mocks):
+    publish, save = api_mocks
+
+    response = await post_task({"square_feet": 900})
+
+    assert response.status_code == 202
+
+    publish.assert_awaited_once()
+    save.assert_awaited_once()
+
+    payload = publish.await_args.args[1]
+
+    assert payload["square_feet"] == 900
+    assert payload["bedrooms"] is None
+    assert payload["bathrooms"] is None
+    assert payload["cityname"] is None
+    assert payload["state"] is None
 
 
 @pytest.mark.asyncio
@@ -103,65 +102,96 @@ async def test_process_missing_optional_features(model_loader: Mock) -> None:
         {},
     ],
 )
-async def test_process_invalid_input(
-    model_loader: Mock,
-    payload: dict,
-) -> None:
-    app = main_module.app
+async def test_invalid_input(api_mocks, payload):
+    publish, save = api_mocks
 
-    async with main_module.lifespan(app):
-        transport = ASGITransport(app=app)
+    response = await post_task(payload)
 
-        async with AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            response = await client.post("/process", json=payload)
+    assert response.status_code == 422
 
-        assert response.status_code == 422
-        model_loader.return_value.model.predict.assert_not_called()
+    publish.assert_not_awaited()
+    save.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_process_prediction_failure(model_loader: Mock) -> None:
-    model_loader.return_value.model.predict.side_effect = RuntimeError(
-        "Prediction failed"
-    )
-    app = main_module.app
+async def test_queue_full(api_mocks):
+    publish, save = api_mocks
 
-    async with main_module.lifespan(app):
-        transport = ASGITransport(app=app)
+    publish.side_effect = QueueFull("Queue is full")
 
-        async with AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            response = await client.post(
-                "/process",
-                json={"square_feet": 900},
-            )
-
-        assert response.status_code == 500
-        assert response.json() == {"detail": "Не удалось получить предсказание."}
-
-
-@pytest.mark.asyncio
-async def test_process_model_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app = main_module.app
-    monkeypatch.setattr(app.state, "price_model", None, raising=False)
-
-    transport = ASGITransport(app=app)
-
-    async with AsyncClient(
-        transport=transport,
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            "/process",
-            json={"square_feet": 900},
-        )
+    response = await post_task({"square_feet": 900})
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "Модель ещё не загружена."}
+    assert response.headers["retry-after"] == str(tasks_api.settings.retry_after)
+
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_broker_unavailable(api_mocks):
+    publish, save = api_mocks
+
+    publish.side_effect = ConnectionError("RabbitMQ unavailable")
+
+    response = await post_task({"square_feet": 900})
+
+    assert response.status_code == 503
+    assert "retry-after" in response.headers
+
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_task_status(monkeypatch):
+    task_id = str(uuid4())
+    now = datetime.now(UTC)
+
+    get_task = AsyncMock(
+        return_value={
+            "id": task_id,
+            "status": "COMPLETED",
+            "attempts": 1,
+            "predicted_price": 4331.42,
+            "error": None,
+            "created_at": now,
+            "finished_at": now,
+        }
+    )
+
+    monkeypatch.setattr(tasks_api, "get_task", get_task)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(f"/api/v1/tasks/{task_id}")
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["task_id"] == task_id
+    assert data["status"] == "COMPLETED"
+    assert data["attempts"] == 1
+    assert data["predicted_price"] == 4331.42
+
+    get_task.assert_awaited_once_with(task_id)
+
+
+@pytest.mark.asyncio
+async def test_task_not_found(monkeypatch):
+    get_task = AsyncMock(return_value=None)
+
+    monkeypatch.setattr(tasks_api, "get_task", get_task)
+
+    task_id = str(uuid4())
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(f"/api/v1/tasks/{task_id}")
+
+    assert response.status_code == 404
+
+    get_task.assert_awaited_once_with(task_id)
