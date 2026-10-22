@@ -1,8 +1,9 @@
+
 # RentLens
 
 RentLens — учебный сервис прогнозирования месячной стоимости аренды квартир в США.
 
-Пользователь передаёт параметры квартиры в API, а сервис возвращает оценку аренды в долларах и информацию об использованной модели.
+Пользователь передаёт параметры квартиры в API, получает идентификатор задачи и позже запрашивает прогноз аренды по этому идентификатору. Вычисления выполняет отдельный воркер через RabbitMQ.
 
 Проект включает подготовку данных, EDA, обучение и сравнение моделей, отслеживание экспериментов в MLflow, Model Registry и асинхронный API на FastAPI.
 
@@ -14,8 +15,9 @@ RentLens — учебный сервис прогнозирования меся
 - обучение LinearRegression, RandomForestRegressor и CatBoostRegressor;
 - сохранение параметров, метрик, датасетов и артефактов в MLflow;
 - регистрация моделей и выбор рабочей версии через alias `champion`;
-- загрузка модели один раз при запуске приложения;
-- асинхронный `POST /process`;
+- загрузка модели из MLflow Registry один раз при запуске воркера;
+- асинхронные `POST /api/v1/tasks` и `GET /api/v1/tasks/{task_id}`;
+- ограниченная очередь RabbitMQ, backpressure, повторные попытки и DLQ;
 - проверка состояния приложения и PostgreSQL;
 - автоматические тесты, Ruff и pre-commit;
 - контейнеризация через Docker Compose;
@@ -127,16 +129,22 @@ LinearRegression используется как базовая модель.
 ## Технологии
 
 Python 3.12, FastAPI, Uvicorn, PostgreSQL 17, SQLAlchemy, asyncpg,
-pandas, matplotlib, scikit-learn, CatBoost, MLflow 3.5.1,
-uv, pytest, httpx, Ruff, pre-commit, Docker, GitHub Actions и GHCR.
+pandas, matplotlib, scikit-learn, CatBoost, MLflow 3.5.1, FastStream,
+RabbitMQ, aio-pika, Testcontainers, uv, pytest, httpx, Ruff, pre-commit, Docker, GitHub Actions и GHCR.
 
 ## Основные файлы
 
 | Файл или папка | Назначение |
 |---|---|
-| `src/rentlens/main.py` | Создание приложения и загрузка модели при запуске |
-| `src/rentlens/api/process.py` | Валидация параметров и предсказание цены |
+| `src/rentlens/main.py` | Создание FastAPI и подключение к RabbitMQ |
+| `src/rentlens/api/process.py` | Валидация параметров и загрузка модели из MLflow |
 | `src/rentlens/api/health.py` | Проверки состояния и версия приложения |
+| `src/rentlens/api/tasks.py` | Создание задач и получение их статуса |
+| `src/rentlens/worker.py` | FastStream-воркер с подтверждениями и повторными попытками |
+| `src/rentlens/task_broker.py` | RabbitMQ, издатель и обработка переполнения |
+| `src/rentlens/task_config.py` | Настройки очереди и concurrency |
+| `src/rentlens/task_store.py` | Сохранение статуса и идемпотентность в PostgreSQL |
+| `src/rentlens/batch_source.py` | Генератор задач с замедлением источника |
 | `src/rentlens/config.py` | Настройки приложения |
 | `src/rentlens/database.py` | Подключение к PostgreSQL |
 | `src/rentlens/logging_config.py` | Настройка логирования |
@@ -154,7 +162,9 @@ uv, pytest, httpx, Ruff, pre-commit, Docker, GitHub Actions и GHCR.
 | `tests/` | Проверки API и загрузки модели |
 | `Dockerfile` | Образ приложения |
 | `Dockerfile.mlflow` | Образ MLflow |
-| `compose.yaml` | Приложение, MLflow и две базы PostgreSQL |
+| `compose.yaml` | Базовая инфраструктура |
+| `compose.override.yaml` | RabbitMQ, worker и настройки для ДЗ №4 |
+| `measurements/` | CSV, логи экспериментов и пять графиков |
 | `pyproject.toml`, `uv.lock` | Зависимости и настройки инструментов |
 
 ## Установка
@@ -182,7 +192,7 @@ cp .env.example .env
 
 ## Docker Compose
 
-Используются четыре сервиса:
+Для ДЗ №4 используются шесть сервисов:
 
 | Сервис | Назначение |
 |---|---|
@@ -190,6 +200,8 @@ cp .env.example .env
 | `db` | PostgreSQL приложения |
 | `mlflow` | Tracking Server и Model Registry, порт 5000 |
 | `mlflow-db` | PostgreSQL для метаданных MLflow |
+| `rabbitmq` | Очереди задач, DLQ и веб-интерфейс (порт 15672) |
+| `worker` | ML-инференс отдельно от FastAPI |
 
 Backend Store MLflow размещён в отдельной PostgreSQL.
 Artifact Store размещён в volume `mlflow_artifacts`.
@@ -213,8 +225,8 @@ Artifact Store размещён в volume `mlflow_artifacts`.
 docker compose up -d --build
 ```
 
-Приложение ждёт готовности PostgreSQL и MLflow, затем загружает модель.
-Принимать запросы оно начинает после сообщения `Application startup complete`.
+API подключается к PostgreSQL и RabbitMQ. Отдельный воркер загружает модель `rentlens-price@champion` из MLflow при запуске.
+До отправки задач проверьте готовность сервисов, в том числе воркера.
 
 ```bash
 docker compose ps
@@ -233,10 +245,10 @@ docker compose up -d --build db mlflow-db mlflow
 После регистрации запустите приложение:
 
 ```bash
-docker compose up -d --build app
+docker compose up -d --build app worker
 ```
 
-При пустом Registry приложение не сможет завершить запуск: ему требуется зарегистрированная модель с alias `champion`.
+При пустом Registry воркер не сможет начать инференс: ему требуется зарегистрированная модель с alias `champion`.
 
 ### Остановка
 
@@ -332,61 +344,31 @@ LinearRegression сохранена в эксперименте как базо�
 models:/rentlens-price@champion
 ```
 
-При запуске приложение получает конкретную версию через alias
-и загружает её по номеру версии. Поэтому ответ API содержит
-номер именно загруженной модели.
+При запуске воркер разрешает alias в конкретную версию модели и загружает её в память. Для перехода на другую версию воркер необходимо перезапустить.
 
 ## API
 
-### `POST /process`
+### `POST /api/v1/tasks`
 
-Асинхронный endpoint прогнозирования месячной аренды.
-
-Обязательное поле — `square_feet`.
-Остальные признаки можно передать как `null` или пропустить:
-пропуски обработает сохранённый preprocessing.
-
-Пример:
+Отправляет задачу в RabbitMQ и возвращает `202 Accepted` с `task_id` и ссылкой для проверки статуса. Обязателен `square_feet`; остальные признаки необязательны.
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8000/process \
-  -H "Content-Type: application/json" \
-  -d '{
-    "square_feet": 900,
-    "bedrooms": 2,
-    "bathrooms": 1,
-    "latitude": 40.7128,
-    "longitude": -74.0060,
-    "cityname": "New York",
-    "state": "NY",
-    "pets_allowed": "Cats,Dogs"
-  }'
+curl -i -X POST http://127.0.0.1:8000/api/v1/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"square_feet":900,"bedrooms":2,"bathrooms":1,"latitude":40.7128,"longitude":-74.006,"cityname":"New York","state":"NY","pets_allowed":"Cats,Dogs"}'
 ```
 
-Ответ текущего RandomForest:
+Ответ содержит статус `ACCEPTED`, идентификатор `task_id` и `status_url`. При переполнении очереди или недоступности RabbitMQ сервис отвечает `503 Service Unavailable` с заголовком `Retry-After`. Некорректные параметры вызывают `422`.
 
-```json
-{
-  "predicted_price": 4331.42,
-  "currency": "USD",
-  "price_type": "monthly",
-  "model_name": "rentlens-price",
-  "model_version": "1",
-  "model_algorithm": "RandomForestRegressor"
-}
+### `GET /api/v1/tasks/{task_id}`
+
+Возвращает текущий статус `PENDING`, `PROCESSING`, `COMPLETED` или `FAILED`, число попыток, а после успешного инференса — `predicted_price`. Для неизвестного идентификатора возвращает `404`.
+
+```bash
+curl http://127.0.0.1:8000/api/v1/tasks/ЗАМЕНИТЕ_НА_TASK_ID
 ```
 
-Это прогноз для переданных параметров, а не цена реального объявления.
-
-Предсказание выполняется в отдельном потоке.
-Модель не загружается повторно при каждом запросе.
-
-Коды ответа:
-
-- `200` — прогноз получен;
-- `422` — некорректные параметры;
-- `503` — модель не загружена;
-- `500` — ошибка предсказания.
+Предсказание выполняется воркером и не блокирует event loop FastAPI.
 
 ### Health endpoints
 
@@ -401,62 +383,116 @@ curl -sS -X POST http://127.0.0.1:8000/process \
 
 ## Переключение рабочей модели
 
-Назначение `champion` версии 2:
+Модель выбирается по alias `champion` при старте воркера. После назначения alias на другую версию нужно перезапустить **воркер**, а не API:
 
 ```bash
-uv run python - <<'PY'
-import mlflow
-from mlflow.tracking import MlflowClient
-
-mlflow.set_tracking_uri("http://127.0.0.1:5000")
-client = MlflowClient()
-client.set_registered_model_alias("rentlens-price", "champion", "2")
-PY
+docker compose restart worker
+docker compose logs --tail=50 worker
 ```
 
-До перезапуска приложение продолжит использовать предыдущую модель.
+Уже выполняемые задачи при остановке воркера завершаются в рамках graceful shutdown, а при аварийной остановке неподтверждённые сообщения RabbitMQ могут быть доставлены повторно.
+
+## Противодавление (backpressure) — домашняя работа №4
+
+### Архитектура
+
+`Client → FastAPI → RabbitMQ → FastStream worker → MLflow model → PostgreSQL`.
+
+Воркер загружает модель из `MLflow Model Registry` по alias `champion` один раз при старте. Задержка инференса задаётся параметром `INFERENCE_SECONDS`; предсказание модели вызывается через `asyncio.to_thread`, чтобы не блокировать цикл событий.
+
+Очередь в режиме `bounded` использует `x-max-length=10` и `x-overflow=reject-publish`. Публикация выполняется с подтверждениями брокера (publisher confirms). Каждый воркер использует `prefetch_count=1`, то есть одновременно получает не более одной неподтверждённой задачи. `WORKER_CONCURRENCY=1` ограничивает параллельность внутри воркера.
+
+Если RabbitMQ отклоняет публикацию, пакетный источник сохраняет тот же `task_id`, экспоненциально увеличивает паузу от 0,1 до 2 секунд и повторяет попытку. HTTP API вместо накопления запросов возвращает `503` и `Retry-After` (в базовой конфигурации — 2 секунды). В БД не создаётся `PENDING` для отклонённого брокером запроса.
+
+Подтверждение `ack` отправляется только после сохранения результата. При временной ошибке используется `nack(requeue=True)`. После трёх неуспешных попыток задача получает статус `FAILED`, сообщение отклоняется без повторной постановки и попадает в `rentlens.dlq` через DLX. Уникальный `task_id` и условные обновления в PostgreSQL предотвращают повторную фиксацию уже завершённой задачи. Для остановки предусмотрен graceful shutdown.
+
+### Параметры
+
+| Переменная | Значение при эксперименте | Назначение |
+|---|---:|---|
+| `QUEUE_MODE` | `bounded` / `unbounded` | Режим очереди |
+| `QUEUE_LIMIT` | `10` | Максимум готовых сообщений в ограниченной очереди |
+| `PREFETCH_COUNT` | `1` | Максимум неподтверждённых сообщений на воркер |
+| `WORKER_CONCURRENCY` | `1` | Параллелизм инференса внутри воркера |
+| `INFERENCE_SECONDS` | `2` | Искусственная задержка обработки |
+| `MAX_ATTEMPTS` | `3` | Порог отправки неудачной задачи в DLQ |
+
+### Запуск и проверка
 
 ```bash
-docker compose restart app
-docker compose logs --since=1m app
+docker compose up -d --build
+docker compose ps
+docker compose exec rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers
 ```
 
-После завершения загрузки `/process` будет использовать CatBoost,
-версию 2. Код endpoint менять не требуется.
+RabbitMQ Management UI: http://127.0.0.1:15672 (`rentlens` / `rentlens` в локальном Docker Compose). Swagger: http://127.0.0.1:8000/docs.
 
-Для возврата RandomForest выполните ту же команду назначения alias
-с версией `"1"` и снова перезапустите приложение.
+Запуск источника на 40 задач с хост-машины:
 
-В текущей реализации переключение требует перезапуска и вызывает
-кратковременную недоступность единственного экземпляра приложения.
+```bash
+RABBITMQ_URL=amqp://rentlens:rentlens@127.0.0.1:5672/ BATCH_COUNT=40 uv run python -m rentlens.batch_source
+```
 
-Для обновления без простоя можно запускать новый экземпляр с выбранной
-версией, проверять его готовность и затем переключать на него трафик.
+Сравнение двух воркеров выполняется после запуска и готовности обоих контейнеров, например `docker compose up -d --scale worker=2 worker`. Чтобы вернуться к одному воркеру: `docker compose up -d --scale worker=1 worker`. Для режима без ограничения задайте `QUEUE_MODE=unbounded` в окружении **всех** участников и перезапустите сервисы; после эксперимента верните `bounded`.
+
+### Эксперименты
+
+Во всех трёх сценариях источник отправлял 40 задач, задержка инференса составляла около двух секунд, `prefetch_count=1` на воркер. Замеры хранятся в `measurements/`.
+
+| Сценарий | Принято | Отклонений при публикации | Время отправки 40 задач | Скорость источника | Пик `ready` | Пик `unacked` |
+|---|---:|---:|---:|---:|---:|---:|
+| Ограниченная, 1 воркер | 40 | 125 | 60,26 с | 0,66/с | 10 | 1 |
+| Ограниченная, 2 воркера | 40 | 61 | 29,44 с | 1,36/с | 10 | 2 |
+| Неограниченная, 1 воркер | 40 | 0 | ≈0,04 с | ≈1000/с | 40 | 1 |
+
+В таблице указано **время отправки задач источником**, а не время завершения предсказаний. В неограниченном режиме источник отправляет сообщения почти мгновенно, но задачи продолжают ожидать обработки. В ограниченном режиме очередь удерживается в пределах десяти готовых сообщений, а источник замедляется под нагрузкой. Второй воркер увеличил наблюдаемую скорость отправки с 0,66 до 1,36 задачи/с (примерно в 2,05 раза).
+
+Пиковая память воркеров в ограниченном режиме: около 590 МБ для одного и суммарно около 1178 МБ для двух. В неограниченном сценарии наблюдалось около 655 МБ у одного воркера и около 253 МБ у RabbitMQ. Эти значения зависят от загрузки модели и момента измерения; не являются изолированной оценкой стоимости одной задачи.
+
+В общей выборке из 322 завершённых задач время `finished_at - created_at` составило в среднем 2,10 с, минимум 2,03 с, максимум 20,11 с. Максимум относится к отдельному испытанию с 20-секундной задержкой. Для задач, созданных источником, `created_at` фиксируется при начале обработки воркером; для задач HTTP API учитывается время после регистрации задачи, поэтому эти значения нельзя считать полностью сопоставимой метрикой задержки ожидания в очереди.
+
+### Графики
+
+Глубина очереди во времени:
+
+![Глубина очереди](measurements/plots/queue_depth.png)
+
+Потребление памяти RabbitMQ:
+
+![Память RabbitMQ](measurements/plots/rabbitmq_memory.png)
+
+Потребление памяти воркеров:
+
+![Память воркеров](measurements/plots/worker_memory.png)
+
+Прогресс и скорость отправки задач источником:
+
+![Скорость источника](measurements/plots/source_progress.png)
+
+Время выполнения отдельных задач, упорядоченных по созданию:
+
+![Время выполнения задач](measurements/plots/task_durations.png)
+
+Графики строятся из CSV и логов экспериментов:
+
+```bash
+uv run python scripts/plot_experiments.py
+uv run python scripts/plot_task_durations.py
+```
+
+### Проверки отказов
+
+Ручными испытаниями проверены `503` и `Retry-After` при переполнении, отсутствие оставшихся `PENDING` после отказа, отправка некорректной задачи в DLQ после трёх попыток, идемпотентность повторной доставки и graceful shutdown в ходе длительного инференса. Автоматические проверки включают `TestRabbitBroker` и интеграционный тест переполнения с настоящим RabbitMQ через `Testcontainers`.
 
 ## Проверки качества
 
 ```bash
-uv run --group web ruff check .
-uv run --group web ruff format --check .
-uv run --group web python -m pytest \
-  --cov=rentlens \
-  --cov-report=term-missing \
-  --cov-fail-under=90
+uv run ruff check .
+uv run ruff format --check .
+DATABASE_URL="postgresql+asyncpg://rentlens:rentlens@localhost:5432/rentlens" uv run pytest --cov=rentlens --cov-report=term-missing --cov-fail-under=90
 ```
 
-Последняя локальная проверка:
-
-- 18 тестов прошли;
-- покрытие `rentlens` — 98,53%;
-- покрытие `api/process.py` — 100%;
-- Ruff lint прошёл.
-
-Тесты проверяют health endpoints, успешное предсказание,
-обработку пропусков и неверных параметров, ошибки модели,
-однократную загрузку и выбор конкретной версии через alias.
-
-В тестах PostgreSQL и загрузка модели подменяются тестовыми объектами.
-Работающие внешние сервисы для unit-тестов не требуются.
+Последняя локальная проверка: **57 passed**, покрытие **94,75%**, обе проверки Ruff пройдены. Предупреждение Testcontainers связано с устаревающим декоратором внутри библиотеки, не с провалом теста.
 
 ## Pre-commit
 
@@ -490,22 +526,13 @@ Docker-образ содержит приложение и зависимост�
 
 ## Работа с Git
 
-Перед коммитом проверьте изменённые файлы:
+Работа ведётся в ветке `homework-4`. Перед коммитом следует проверить `git status --short` и `git diff --check`. Не добавляйте `.env`, `.venv`, пароли, токены и локальные хранилища MLflow.
 
 ```bash
-git status --short
-git diff
-```
-
-Не добавляйте `.env`, `.venv`, пароли, токены и локальные хранилища MLflow.
-
-Для текущей работы используется ветка `homework-3`.
-После проверки изменений создайте коммит и отправьте ветку:
-
-```bash
-git add .
-git commit -m "feat: add MLflow training and rental prediction API"
-git push -u origin homework-3
+git add README.md compose.override.yaml measurements scripts/monitor.py scripts/plot_experiments.py scripts/plot_task_durations.py src/rentlens tests pyproject.toml uv.lock
+git diff --cached --stat
+git commit -m "feat: add RabbitMQ backpressure pipeline"
+git push -u origin homework-4
 ```
 
 ## Команда
