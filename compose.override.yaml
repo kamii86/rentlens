@@ -1,0 +1,61 @@
+
+services:
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: rentlens
+      RABBITMQ_DEFAULT_PASS: rentlens
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    restart: unless-stopped
+
+  app:
+    environment:
+      RABBITMQ_URL: amqp://rentlens:rentlens@rabbitmq:5672/
+      QUEUE_MODE: ${QUEUE_MODE:-bounded}
+      QUEUE_LIMIT: ${QUEUE_LIMIT:-10}
+      INFERENCE_SECONDS: ${INFERENCE_SECONDS:-2.0}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["faststream", "run", "rentlens.worker:app"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://rentlens:rentlens@db:5432/rentlens
+      RABBITMQ_URL: amqp://rentlens:rentlens@rabbitmq:5672/
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_MODEL_NAME: rentlens-price
+      MLFLOW_MODEL_ALIAS: champion
+      QUEUE_MODE: ${QUEUE_MODE:-bounded}
+      QUEUE_LIMIT: ${QUEUE_LIMIT:-10}
+      PREFETCH_COUNT: ${PREFETCH_COUNT:-1}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+      INFERENCE_SECONDS: ${INFERENCE_SECONDS:-2.0}
+      MAX_ATTEMPTS: "3"
+      GRACEFUL_TIMEOUT: "40"
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    stop_signal: SIGTERM
+    stop_grace_period: 50s
+    restart: unless-stopped
+
+volumes:
+  rabbitmq_data:
