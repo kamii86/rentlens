@@ -1,41 +1,10 @@
-
 # RentLens
 
-RentLens — учебный сервис прогнозирования месячной стоимости аренды квартир в США.
+RentLens — асинхронный сервис прогнозирования месячной стоимости аренды квартир в США.
 
 Пользователь передаёт параметры квартиры в API, получает идентификатор задачи и позже запрашивает прогноз аренды по этому идентификатору. Вычисления выполняет отдельный воркер через RabbitMQ.
 
 Проект включает подготовку данных, EDA, обучение и сравнение моделей, отслеживание экспериментов в MLflow, Model Registry и асинхронный API на FastAPI.
-
-## ДЗ №5: наблюдаемость
-
-Добавлены JSON-логи с контекстом задачи, распределённые трейсы OpenTelemetry,
-прикладные метрики и Docker-профили Loki/Alloy, Tempo, Prometheus и Grafana.
-Дашборд, источники данных, связи логов и трейсов и два алерта создаются из файлов.
-
-Запуск, бюджет ресурсов, кардинальность, проверенные сценарии и восстановление
-после удаления томов описаны в [observability/README.md](observability/README.md).
-Факты ручных проверок сохранены в
-[measurements/hw5-validation.json](measurements/hw5-validation.json).
-
-Проверено: 87 тестов, покрытие 92,59%; переполнение/503, retry/DLQ,
-два воркера, SIGTERM во время inference, работа без Collector/Loki,
-восстановление champion после удаления томов и связи логов с трейсами в Grafana.
-По замеру под нагрузкой стек наблюдаемости использовал 762,98 МиБ
-при суммарном лимите 1472 МиБ.
-
-Перед удалением томов сохраните рабочую модель на хост:
-
-```bash
-uv run python scripts/model_snapshot.py export
-uv run python scripts/model_snapshot.py verify
-```
-
-Снимок в `model-snapshots/champion` содержит модель с preprocessing, метаданные
-и SHA-256 каждого файла. Он исключён из Git и сохраняется при `docker compose down -v`.
-При пустом MLflow команда `uv run python scripts/model_snapshot.py restore`
-создаёт новый Run, загружает артефакты на сервер, регистрирует версию и назначает
-`rentlens-price@champion`. Старые идентификаторы Run не требуются.
 
 ## Возможности
 
@@ -49,9 +18,41 @@ uv run python scripts/model_snapshot.py verify
 - асинхронные `POST /api/v1/tasks` и `GET /api/v1/tasks/{task_id}`;
 - ограниченная очередь RabbitMQ, backpressure, повторные попытки и DLQ;
 - проверка состояния приложения и PostgreSQL;
+- JSON-логи с контекстом задачи и сквозная трассировка OpenTelemetry;
+- метрики конвейера, дашборд Grafana и алерты, настроенные из файлов;
+- сохранение и восстановление рабочей модели с проверкой SHA-256;
 - автоматические тесты, Ruff и pre-commit;
 - контейнеризация через Docker Compose;
 - CI и публикация Docker-образов через GitHub Actions.
+
+## Наблюдаемость
+
+API, пакетный источник и воркер используют единый формат JSON-логов,
+передают контекст трейса через RabbitMQ и отправляют телеметрию по OTLP
+в OpenTelemetry Collector. Grafana объединяет метрики Prometheus,
+логи Loki и трейсы Tempo.
+
+Дашборд показывает глубину очереди и её лимит, скорость источника и воркеров,
+перцентили задержки, память процессов, HTTP 503 и сообщения в DLQ.
+Из записи лога можно открыть трейс задачи и перейти к связанным логам.
+Источники данных, дашборд и два правила алертов задаются в репозитории.
+
+Для сбора телеметрии установите `OTEL_SDK_DISABLED=false` в `.env`.
+При уже подготовленной модели полный стенд запускается командой:
+
+```bash
+docker compose --profile observability up -d
+```
+
+Grafana доступна на http://127.0.0.1:3000. Для повседневной разработки
+обычный `docker compose up -d` запускает основной конвейер;
+сигналы наблюдаемости включаются отдельными профилями.
+
+Подробная конфигурация, бюджет ресурсов, кардинальность и сценарии диагностики:
+[observability/README.md](observability/README.md).
+Результаты измерений и проверок:
+[отчёт интеграционных проверок](measurements/hw5-validation.json)
+и [измерения памяти](measurements/hw5-memory.csv).
 
 ## Данные
 
@@ -160,7 +161,8 @@ LinearRegression используется как базовая модель.
 
 Python 3.12, FastAPI, Uvicorn, PostgreSQL 17, SQLAlchemy, asyncpg,
 pandas, matplotlib, scikit-learn, CatBoost, MLflow 3.5.1, FastStream,
-RabbitMQ, aio-pika, Testcontainers, uv, pytest, httpx, Ruff, pre-commit, Docker, GitHub Actions и GHCR.
+RabbitMQ, aio-pika, OpenTelemetry SDK, Prometheus, Loki, Tempo, Alloy, Grafana,
+Testcontainers, uv, pytest, httpx, Ruff, pre-commit, Docker, GitHub Actions и GHCR.
 
 ## Основные файлы
 
@@ -177,7 +179,9 @@ RabbitMQ, aio-pika, Testcontainers, uv, pytest, httpx, Ruff, pre-commit, Docker,
 | `src/rentlens/batch_source.py` | Генератор задач с замедлением источника |
 | `src/rentlens/config.py` | Настройки приложения |
 | `src/rentlens/database.py` | Подключение к PostgreSQL |
-| `src/rentlens/logging_config.py` | Настройка логирования |
+| `src/rentlens/logging_config.py` | JSON-логи и контекст задачи |
+| `src/rentlens/telemetry.py` | Настройка SDK, спаны и экспорт телеметрии |
+| `src/rentlens/metrics.py` | Метрики API, источника и воркера |
 | `scripts/clean_data.py` | Очистка исходного датасета |
 | `scripts/eda_overview.py` | Обзор данных |
 | `scripts/eda_plots.py` | Построение графиков |
@@ -188,13 +192,15 @@ RabbitMQ, aio-pika, Testcontainers, uv, pytest, httpx, Ruff, pre-commit, Docker,
 | `scripts/train_catboost.py` | Обучение выбранной конфигурации CatBoost |
 | `scripts/evaluate_best.py` | Проверка основной модели на test |
 | `scripts/register_models.py` | Регистрация моделей и назначение aliases |
+| `scripts/model_snapshot.py` | Сохранение и восстановление рабочей модели |
 | `reports/selected_models.json` | Выбранные модели и ссылки на их запуски |
-| `tests/` | Проверки API и загрузки модели |
+| `tests/` | Проверки API, брокера, воркера, модели и телеметрии |
 | `Dockerfile` | Образ приложения |
 | `Dockerfile.mlflow` | Образ MLflow |
 | `compose.yaml` | Базовая инфраструктура |
-| `compose.override.yaml` | RabbitMQ, worker и настройки для ДЗ №4 |
-| `measurements/` | CSV, логи экспериментов и пять графиков |
+| `compose.override.yaml` | RabbitMQ, воркер, источник и параметры конвейера |
+| `observability/` | Стек мониторинга, provisioning Grafana и документация |
+| `measurements/` | Результаты нагрузочных проверок, графики и измерения ресурсов |
 | `pyproject.toml`, `uv.lock` | Зависимости и настройки инструментов |
 
 ## Установка
@@ -222,7 +228,7 @@ cp .env.example .env
 
 ## Docker Compose
 
-Для ДЗ №4 используются шесть сервисов:
+Основной конвейер состоит из шести сервисов. Пакетный источник запускается отдельно профилем `batch`:
 
 | Сервис | Назначение |
 |---|---|
@@ -232,6 +238,7 @@ cp .env.example .env
 | `mlflow-db` | PostgreSQL для метаданных MLflow |
 | `rabbitmq` | Очереди задач, DLQ и веб-интерфейс (порт 15672) |
 | `worker` | ML-инференс отдельно от FastAPI |
+| `source` | Пакетная публикация задач, профиль `batch` |
 
 Backend Store MLflow размещён в отдельной PostgreSQL.
 Artifact Store размещён в volume `mlflow_artifacts`.
@@ -422,13 +429,28 @@ docker compose logs --tail=50 worker
 
 Уже выполняемые задачи при остановке воркера завершаются в рамках graceful shutdown, а при аварийной остановке неподтверждённые сообщения RabbitMQ могут быть доставлены повторно.
 
-## Противодавление (backpressure) — домашняя работа №4
+### Сохранение и восстановление модели
+
+Перед удалением томов сохраните рабочую модель на хост:
+
+```bash
+uv run python scripts/model_snapshot.py export
+uv run python scripts/model_snapshot.py verify
+```
+
+Снимок в `model-snapshots/champion` содержит модель с preprocessing, метаданные
+и SHA-256 каждого файла. Он исключён из Git и сохраняется при `docker compose down -v`.
+При пустом MLflow команда `uv run python scripts/model_snapshot.py restore`
+создаёт новый Run, загружает артефакты на сервер, регистрирует версию и назначает
+`rentlens-price@champion`. Старые идентификаторы Run не требуются.
+
+## Противодавление (backpressure)
 
 ### Архитектура
 
 `Client → FastAPI → RabbitMQ → FastStream worker → MLflow model → PostgreSQL`.
 
-Воркер загружает модель из `MLflow Model Registry` по alias `champion` один раз при старте. Задержка инференса задаётся параметром `INFERENCE_SECONDS`; предсказание модели вызывается через `asyncio.to_thread`, чтобы не блокировать цикл событий.
+Воркер загружает модель из `MLflow Model Registry` по alias `champion` один раз при старте. Задержка инференса задаётся параметром `INFERENCE_SECONDS`; предсказание выполняется в пуле потоков через `run_in_executor` с явной передачей контекста `contextvars`, чтобы не блокировать цикл событий и сохранить связь логов и спанов.
 
 Очередь в режиме `bounded` использует `x-max-length=10` и `x-overflow=reject-publish`. Публикация выполняется с подтверждениями брокера (publisher confirms). Каждый воркер использует `prefetch_count=1`, то есть одновременно получает не более одной неподтверждённой задачи. `WORKER_CONCURRENCY=1` ограничивает параллельность внутри воркера.
 
@@ -582,10 +604,10 @@ uv run python scripts/plot_task_durations.py
 ```bash
 uv run ruff check .
 uv run ruff format --check .
-DATABASE_URL="postgresql+asyncpg://rentlens:rentlens@localhost:5432/rentlens" uv run pytest --cov=rentlens --cov-report=term-missing --cov-fail-under=90
+uv run --group web pytest --cov=rentlens --cov-report=term-missing --cov-fail-under=90
 ```
 
-Последняя локальная проверка: **57 passed**, покрытие **94,75%**, обе проверки Ruff пройдены. Предупреждение Testcontainers связано с устаревающим декоратором внутри библиотеки, не с провалом теста.
+Полный локальный прогон 15 ноября 2026: **87 passed**, покрытие **92,59%** при пороге 90%, обе проверки Ruff пройдены. Предупреждение Testcontainers связано с устаревающим декоратором внутри библиотеки, не с провалом теста.
 
 ## Pre-commit
 
@@ -616,17 +638,6 @@ ghcr.io/kamii86/rentlens
 
 Docker-образ содержит приложение и зависимости.
 Обученные модели и данные MLflow хранятся отдельно.
-
-## Работа с Git
-
-Работа ведётся в ветке `homework-4`. Перед коммитом следует проверить `git status --short` и `git diff --check`. Не добавляйте `.env`, `.venv`, пароли, токены и локальные хранилища MLflow.
-
-```bash
-git add README.md compose.override.yaml measurements scripts/monitor.py scripts/plot_experiments.py scripts/plot_task_durations.py src/rentlens tests pyproject.toml uv.lock
-git diff --cached --stat
-git commit -m "feat: add RabbitMQ backpressure pipeline"
-git push -u origin homework-4
-```
 
 ## Команда
 
