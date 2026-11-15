@@ -79,6 +79,39 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  model-init:
+    image: rentlens-app:${APP_IMAGE_TAG:-0.1.1-hw5}
+    pull_policy: never
+    command:
+      - python
+      - scripts/model_snapshot.py
+      - ensure
+      - --directory
+      - /snapshots/champion
+      - --name
+      - rentlens-price
+      - --alias
+      - champion
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR: "false"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      OTEL_SERVICE_NAME: rentlens-model-init
+      DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-local}
+    volumes:
+      - ${MODEL_SNAPSHOTS_PATH:-./model-snapshots}:/snapshots:ro
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    mem_limit: 1g
+    init: true
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
   app:
     build:
       context: .
@@ -95,6 +128,8 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_healthy
+      model-init:
+        condition: service_completed_successfully
     restart: unless-stopped
     logging:
       driver: "json-file"

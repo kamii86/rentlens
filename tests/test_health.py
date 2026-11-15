@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -64,7 +66,9 @@ async def test_health_database_unavailable(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_health_database_available(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_health_database_available(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     class FakeResult:
         def scalar_one(self):
             return "PostgreSQL test version"
@@ -84,6 +88,7 @@ async def test_health_database_available(monkeypatch: pytest.MonkeyPatch) -> Non
             return FakeConnection()
 
     monkeypatch.setattr(health_module, "engine", FakeEngine())
+    caplog.set_level(logging.INFO, logger=health_module.logger.name)
 
     transport = ASGITransport(app=app)
 
@@ -100,3 +105,8 @@ async def test_health_database_available(monkeypatch: pytest.MonkeyPatch) -> Non
     assert data["components"]["postgresql"]["status"] == "ok"
     assert data["components"]["postgresql"]["version"] == "PostgreSQL test version"
     assert data["components"]["postgresql"]["response_time_ms"] >= 0
+    assert not [
+        record
+        for record in caplog.records
+        if record.name == health_module.logger.name and record.levelno >= logging.INFO
+    ]

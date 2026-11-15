@@ -127,6 +127,9 @@ def configure_logging() -> None:
     if not isinstance(level, int):
         raise ValueError(f"Invalid LOG_LEVEL: {level_name}")
 
+    os.environ.setdefault("MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR", "false")
+    os.environ.setdefault("MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT", "true")
+
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
     handler.addFilter(HealthCheckFilter())
@@ -136,6 +139,7 @@ def configure_logging() -> None:
         handlers=[handler],
         force=True,
     )
+    logging.captureWarnings(True)
 
     # Библиотеки используют общий обработчик и формат.
     for name in (
@@ -143,10 +147,16 @@ def configure_logging() -> None:
         "uvicorn.error",
         "uvicorn.access",
         "faststream",
+        "mlflow",
         "aio_pika",
         "aiormq",
     ):
         library_logger = logging.getLogger(name)
         library_logger.handlers.clear()
         library_logger.propagate = True
-        library_logger.setLevel(logging.NOTSET)
+        # AMQP DEBUG dumps include message bodies and PLAIN authentication frames.
+        library_logger.setLevel(
+            max(level, logging.INFO)
+            if name in {"aio_pika", "aiormq"}
+            else logging.NOTSET
+        )

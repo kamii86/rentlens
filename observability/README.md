@@ -48,6 +48,12 @@ PostgreSQL MLflow 36,03 МиБ, RabbitMQ 115,9 МиБ. Всего RentLens — 2
 у Grafana в этом замере занято около 91% её лимита.
 Исходные числа сохранены в `measurements/hw5-memory.csv`.
 
+Повторный замер после перехода на общий образ, при работающем источнике:
+наблюдаемость — **722,61 МиБ**, весь проект — **2035,83 МиБ**.
+Grafana использовала 259 МиБ из 320 МиБ; источник — 35,04 МиБ,
+воркер — 450,40 МиБ. Это также один снимок под нагрузкой, а не оценка пика.
+Новый замер сохранён в `measurements/observability-repairs-memory.csv`.
+
 У Loki, Tempo и Prometheus retention 48 часов. У Prometheus дополнительно ограничен размер TSDB. Данные хранятся в именованных томах. В образы добавлен статический BusyBox для HTTP health-check; версии исходных образов закреплены.
 
 ## Профили
@@ -64,13 +70,26 @@ docker compose --profile observability up -d
 
 В `.env` по умолчанию `OTEL_SDK_DISABLED=true`: приложение пишет JSON в stdout и работает без Collector. Для сбора сигналов установите `OTEL_SDK_DISABLED=false` и пересоздайте app/worker/source. Экспортеры можно независимо отключить через `OTEL_TRACES_EXPORTER=none` и `OTEL_METRICS_EXPORTER=none`.
 
-При полном запуске предварительно нужна рабочая модель `rentlens-price@champion` в MLflow. Подготовка модели описана в основном README. Удаление томов через `docker compose down -v` удаляет также метаданные и артефакты MLflow. Процедура сохранения и восстановления приведена ниже.
+Для полного запуска нужна модель `rentlens-price@champion` в MLflow или проверенный
+локальный снимок. Одноразовый `model-init` сохраняет существующий champion либо
+восстанавливает его из снимка; API и воркер ждут успешного завершения подготовки.
+Удаление томов через `docker compose down -v` удаляет метаданные и артефакты MLflow,
+но не снимок на хосте. Процедура сохранения и запуска приведена ниже.
 
 ## Логи
 
 Используется стандартный logging с JSON-форматтером: он охватывает и приложение, и библиотечные логи. Уровень задаётся LOG_LEVEL. Входные записи и пароли из DSN не выводятся; ошибки сохраняют тип и стек без значений входных данных.
 
-Alloy читает Docker API через сокет, смонтированный read-only. Docker discovery отбирает только `com.docker.compose.project` текущего проекта и сервисы app/worker/source. Индексируемые метки Loki: service, level, env. task_id, batch_id, trace_id, span_id и instance остаются полями JSON. Автоматическое добавление Loki service_name отключено, чтобы набор меток оставался явным.
+MLflow и Python warnings используют общий обработчик. Успешная проверка БД
+пишется на DEBUG. При LOG_LEVEL=DEBUG протокольные логгеры aio_pika/aiormq
+остаются на INFO, поскольку дампы AMQP содержат тела сообщений и кадры
+аутентификации; DEBUG приложения при этом сохраняется.
+
+Подготовка модели использует методы MlflowClient для регистрации: fluent-функция
+register_model печатает текст напрямую, минуя logging. Автоматическая печать
+ссылок на Run отключена через MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT.
+
+Alloy читает Docker API через сокет, смонтированный read-only. Docker discovery отбирает только `com.docker.compose.project` текущего проекта и сервисы app/worker/source/model-init. Индексируемые метки Loki: service, level, env. task_id, batch_id, trace_id, span_id и instance остаются полями JSON. Автоматическое добавление Loki service_name отключено, чтобы набор меток оставался явным.
 
 Поиск истории задачи:
 
@@ -186,11 +205,16 @@ uv run python scripts/model_snapshot.py verify
 по умолчанию используется `http://127.0.0.1:5000`.
 
 Перед запуском подготовьте образы. Если они уже собраны из текущих исходников,
-повторять build не требуется. Сборка выполняется до удаления томов и отдельно
-от запуска всего стека; последовательный build снижает конкуренцию за ресурсы:
+повторять build не требуется. Python-сервисы используют один образ,
+который собирается только для app. Каждый инфраструктурный образ собирается
+отдельной командой, чтобы не экспортировать несколько образов одновременно:
 
 ```bash
-COMPOSE_PARALLEL_LIMIT=1 docker compose --profile observability --profile batch build
+docker compose build app
+docker compose build mlflow
+for service in otel-collector tempo prometheus loki alloy grafana; do
+  docker compose --profile observability build "$service" || break
+done
 ```
 
 После успешной проверки снимка можно воспроизвести запуск с пустыми томами
@@ -198,22 +222,48 @@ COMPOSE_PARALLEL_LIMIT=1 docker compose --profile observability --profile batch 
 
 ```bash
 docker compose --profile observability --profile batch down -v --remove-orphans
-docker compose up -d --no-build --pull never --wait --wait-timeout 180 db rabbitmq mlflow
-uv run python scripts/model_snapshot.py restore
-docker compose --profile observability up -d --no-build --pull never --wait --wait-timeout 180 \
-  otel-collector tempo prometheus loki alloy grafana
-docker compose up -d --no-build --pull never --wait --wait-timeout 180 app worker
+docker compose --profile observability up -d --no-build --pull never \
+  --wait --wait-timeout 300
 docker compose --profile batch up -d --no-build --pull never --no-deps source
 ```
 
 В `.env` для этого сценария должно быть `OTEL_SDK_DISABLED=false`. После запуска
 снова доступны три datasource, дашборд и два правила алертов без настройки через UI.
-Процедура проверена с рабочей моделью: после восстановления alias
+В предыдущем ручном прогоне с отдельной командой restore после восстановления alias
 `rentlens-price@champion` указывает на версию со статусом READY, а прогноз
 для контрольного запроса совпадает с результатом до удаления томов.
 Идентификаторы восстановленного Run и SHA-256 снимка сохранены в
 `measurements/hw5-validation.json`. На другой машине номера версий и Run ID
 могут отличаться; приложение выбирает модель по alias.
+
+Теперь `model-init` выполняет restore автоматически до запуска API/воркера.
+Он использует тот же образ приложения и читает снимок из read-only bind mount
+`MODEL_SNAPSHOTS_PATH` (по умолчанию `./model-snapshots`). Его лимит — 1 ГиБ;
+контейнер завершает работу до загрузки модели воркером и не входит в бюджет
+постоянного стека наблюдаемости. Уже существующий READY champion не заменяется.
+Повреждённый снимок, отсутствие снимка при пустом Registry и ошибки доступа
+прерывают запуск. После устранения причины нужно повторить `up`.
+
+Автоматическая подготовка проверена запуском с пустыми Docker-томами:
+model-init завершился с кодом 0 и событием model_restored, а постоянные
+сервисы стали healthy. Новый запрос после восстановления получил $945,32
+за одну попытку. Его 6 записей в Loki и 8 спанов в Tempo имеют один trace_id.
+Grafana автоматически получила 18 панелей, 3 datasource и 2 правила алертов.
+
+Тесты дополнительно проверяют совпадение прогнозов и повторный запуск без
+новой версии. После правки текстового вывода MLflow отдельный CLI-процесс
+прошёл проверку на том же REST-сервере: stdout целиком JSON, stderr пустой,
+прогнозы совпадают, повторное восстановление сохраняет одну версию.
+Идентификаторы и границы проверок — в
+`measurements/observability-repairs-validation.json`.
+
+В прогоне с новым образом источник опубликовал 120 задач за 229,142 с.
+Получены 470 отказов публикации, после которых источник ждал и повторял
+попытку; это не число потерянных задач. Суммарное ожидание — 226,269 с.
+Средняя скорость за весь пакет — 0,524 задачи/с с учётом начального заполнения
+очереди. PromQL в установившемся интервале показал около 0,48 задачи/с
+и для источника, и для воркера. В конце ready=0, unacked=0, DLQ=0.
+В трейсе одной задачи видны 17 спанов источника и воркера, включая 5 source.wait.
 
 Перед сборкой проверьте свободное место командой `df -h .`.
 Для локального Docker-окружения желательно иметь запас 10–15 ГБ на хосте:
@@ -319,6 +369,8 @@ docker stats --no-stream
 `tests/test_queue_integration.py` можно запускать без доступа к Docker daemon;
 он не заменяет интеграционный тест переполнения реального брокера.
 
-Полный прогон 15 ноября: **87 passed**, покрытие **92,59%** при требовании 90%;
-Ruff check и проверка форматирования 49 файлов прошли. Получено одно
-DeprecationWarning из Testcontainers про устаревающий декоратор ожидания.
+Полный прогон 16 ноября 2026 на Mac с Testcontainers: **98 passed**,
+покрытие **92,62%**. Отдельный набор без `tests/test_queue_integration.py`:
+**97 passed**, покрытие **91,65%**. Ruff check и форматирование 49 файлов прошли.
+CLI-регистрация проверена через REST API реального MLflow; общий образ
+пересобран, API и воркер healthy, model-init завершился с кодом 0.

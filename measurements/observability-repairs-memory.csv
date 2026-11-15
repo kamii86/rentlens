@@ -1,0 +1,14 @@
+service,memory_mib,configured_limit_mib,category
+source,35.04,256,application
+app,139.10,512,application
+worker,450.40,1024,application
+grafana,259.00,320,observability
+mlflow,443.80,,application
+alloy,93.18,192,observability
+prometheus,76.71,256,observability
+db,21.57,512,application
+mlflow-db,40.51,,application
+rabbitmq,182.80,,application
+loki,104.70,256,observability
+tempo,118.00,320,observability
+otel-collector,71.02,128,observability

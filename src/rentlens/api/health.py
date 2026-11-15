@@ -32,7 +32,7 @@ async def health(response: Response) -> dict:
 
         response_time_ms = round((perf_counter() - start) * 1000, 2)
 
-        logger.info(
+        logger.debug(
             "postgresql_healthcheck_success response_time_ms=%s",
             response_time_ms,
         )

@@ -7,20 +7,23 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.19 /uv /uvx /bin/
 COPY pyproject.toml uv.lock README.md ./
 
 RUN uv sync \
+    --no-cache \
     --frozen \
     --no-dev \
     --group web \
     --no-install-project
 
 COPY src ./src
+COPY scripts/model_snapshot.py ./scripts/model_snapshot.py
 
 RUN uv sync \
+    --no-cache \
     --frozen \
     --no-dev \
     --group web
 
 RUN useradd --create-home --uid 10001 appuser \
-    && chown -R appuser:appuser /app
+    && chown appuser:appuser /app
 
 USER appuser
 

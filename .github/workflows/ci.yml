@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches:
-      - main
+      - "**"
   pull_request:
     branches:
       - main
@@ -25,7 +25,7 @@ jobs:
         run: pip install uv
 
       - name: Install dependencies
-        run: uv sync --all-groups
+        run: uv sync --all-groups --frozen
 
       - name: Ruff lint
         run: uv run ruff check .

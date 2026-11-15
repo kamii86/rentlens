@@ -63,11 +63,8 @@ services:
     init: true
 
   worker:
-    pull_policy: build
-    image: rentlens-worker:${APP_IMAGE_TAG:-0.1.1-hw5}
-    build:
-      context: .
-      dockerfile: Dockerfile
+    pull_policy: never
+    image: rentlens-app:${APP_IMAGE_TAG:-0.1.1-hw5}
     command: ["faststream", "run", "rentlens.worker:app"]
     environment:
       <<: *telemetry
@@ -92,6 +89,8 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_healthy
+      model-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('WORKER_HEALTH_PORT', '9000') + '/', timeout=2).close()"]
       interval: 5s
@@ -106,11 +105,8 @@ services:
     restart: unless-stopped
 
   source:
-    pull_policy: build
-    image: rentlens-source:${APP_IMAGE_TAG:-0.1.1-hw5}
-    build:
-      context: .
-      dockerfile: Dockerfile
+    pull_policy: never
+    image: rentlens-app:${APP_IMAGE_TAG:-0.1.1-hw5}
     profiles: [batch]
     command: ["python", "-m", "rentlens.batch_source"]
     environment:

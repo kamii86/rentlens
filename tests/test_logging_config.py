@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import os
+import warnings
 from types import SimpleNamespace
 
 import pytest
@@ -96,3 +98,61 @@ def test_invalid_log_level_is_rejected(monkeypatch):
     monkeypatch.setenv("LOG_LEVEL", "wrong")
     with pytest.raises(ValueError, match="Invalid LOG_LEVEL"):
         logging_config.configure_logging()
+
+
+@pytest.fixture
+def restore_logging():
+    root = logging.getLogger()
+    root_handlers, root_level = root.handlers[:], root.level
+    saved = {
+        name: (logger.handlers[:], logger.level, logger.propagate)
+        for name, logger in logging.Logger.manager.loggerDict.items()
+        if isinstance(logger, logging.Logger)
+    }
+    showwarning = warnings.showwarning
+    yield
+    root.handlers[:], root.level = root_handlers, root_level
+    for name, (handlers, level, propagate) in saved.items():
+        logger = logging.getLogger(name)
+        logger.handlers[:], logger.level, logger.propagate = handlers, level, propagate
+    warnings.showwarning = showwarning
+
+
+def test_mlflow_library_uses_json_stdout(monkeypatch, capsys, restore_logging):
+    import mlflow  # noqa: F401
+
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+    logging_config.configure_logging()
+    logging.getLogger("mlflow").warning("library-warning")
+    captured = capsys.readouterr()
+    entry = json.loads(captured.out)
+    assert entry["logger"] == "mlflow"
+    assert entry["message"] == "library-warning"
+    assert captured.err == ""
+    assert os.environ["MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT"] == "true"
+
+
+@pytest.mark.parametrize("kind", ["payload", "authentication"])
+def test_amqp_protocol_dumps_are_blocked_at_debug(
+    monkeypatch, capsys, restore_logging, kind
+):
+    from aiormq.abc import ChannelFrame
+    from pamqp.body import ContentBody
+    from pamqp.commands import Connection
+
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    logging_config.configure_logging()
+    marker = "PRIVATE_TEST_MARKER"
+    command = (
+        ContentBody(marker.encode())
+        if kind == "payload"
+        else Connection.StartOk(
+            client_properties={}, mechanism="PLAIN", response=f"\x00user\x00{marker}"
+        )
+    )
+    frame = ChannelFrame.marshall(1, [command])
+    logging.getLogger("aiormq.connection").debug("Prepare to send %r", frame)
+    logging.getLogger("rentlens.audit").debug("application-debug")
+    captured = capsys.readouterr()
+    assert marker not in captured.out + captured.err
+    assert json.loads(captured.out)["message"] == "application-debug"

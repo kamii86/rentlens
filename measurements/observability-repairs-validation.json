@@ -1,0 +1,195 @@
+{
+  "date": "2026-11-16",
+  "base_commit": "882a1f1ac15cad4a012f96818da7049ecb8b0250",
+  "status": "full local checks and final runtime validation passed; current-branch GitHub CI pending",
+  "checks": {
+    "ruff_check": "passed",
+    "ruff_format_check": "49 files already formatted",
+    "pytest_without_queue_integration": {
+      "passed": 97,
+      "coverage_percent": 91.65,
+      "platform": "darwin",
+      "python_version": "3.12.3",
+      "excluded": "tests/test_queue_integration.py",
+      "includes_final_stdout_cleanup": true
+    },
+    "compose_profiles": [
+      "default",
+      "logs",
+      "traces",
+      "metrics",
+      "observability"
+    ],
+    "compose_validation": "passed: dependencies, successful model-init gate, read-only snapshot mount, project label filter, observability memory budget",
+    "ci_configuration": "passed: branch push trigger and frozen dependency installation",
+    "existing_champion_snapshot_sha256_verification": "passed; host snapshot was read only",
+    "pytest_full_on_user_mac": {
+      "date": "2026-11-16",
+      "passed": 98,
+      "coverage_percent": 92.62,
+      "duration_seconds": 13.18,
+      "platform": "darwin",
+      "python_version": "3.12.3",
+      "source": "user terminal output after final stdout cleanup",
+      "testcontainers_included": true,
+      "includes_final_stdout_cleanup": true
+    },
+    "common_image_compose_validation": "passed: app is the only Python image build target; worker, source and model-init share its image with pull_policy=never",
+    "common_image_build_on_user_mac": {
+      "status": "passed",
+      "duration_seconds": 51.7,
+      "image": "rentlens-app:0.1.1-hw5",
+      "source": "user terminal output"
+    },
+    "warm_start_on_user_mac": {
+      "status": "passed",
+      "model_init_exit_code": 0,
+      "model_init_event": "model_already_ready",
+      "model_name": "rentlens-price",
+      "model_version": "1",
+      "app": "healthy",
+      "worker": "healthy"
+    },
+    "fresh_task_after_rebuild": {
+      "task_id": "1f0c2241-848f-4734-8f08-3e986348c51a",
+      "http_status": 202,
+      "status": "COMPLETED",
+      "attempts": 1,
+      "predicted_price": 945.32,
+      "currency": "USD",
+      "created_at": "2026-11-15T19:46:53.536794Z",
+      "finished_at": "2026-11-15T19:46:55.839654Z",
+      "trace_id": "d8781f94ef3f479f37ab9bd7803576df",
+      "tempo_spans": 8,
+      "loki_task_log_lines": 6,
+      "services": [
+        "rentlens-api",
+        "rentlens-worker"
+      ],
+      "indexed_loki_labels": [
+        "env",
+        "level",
+        "service"
+      ],
+      "current_application_metric_series": 72,
+      "worker_ok_counter": 1
+    },
+    "cold_start_automatic": {
+      "status": "passed",
+      "before_final_stdout_cleanup": true,
+      "model_init_exit_code": 0,
+      "event": "model_restored",
+      "model_version": "1",
+      "restored_run_id": "5b48a5d53f8248319c0bfe770934e190",
+      "all_persistent_services": "healthy",
+      "task_id": "b1baf8ed-5cc3-4611-a4d5-942508a17a02",
+      "http_status": 202,
+      "task_status": "COMPLETED",
+      "attempts": 1,
+      "predicted_price": 945.32,
+      "created_at": "2026-11-15T20:08:58.669826Z",
+      "finished_at": "2026-11-15T20:09:00.842258Z",
+      "trace_id": "b75878f3dfba27453a7630998283f7be",
+      "tempo_spans": 8,
+      "loki_task_records": 6,
+      "grafana_panels": 18,
+      "grafana_datasources": [
+        "loki",
+        "prometheus",
+        "tempo"
+      ],
+      "grafana_alerts": [
+        "rentlens_queue_full",
+        "rentlens_dlq_nonempty"
+      ]
+    },
+    "real_rest_cli_stdout_cleanup": {
+      "status": "passed",
+      "temporary_synthetic_model": true,
+      "stdout_records": 6,
+      "all_stdout_lines_json": true,
+      "stderr_empty": true,
+      "restored_predictions_match": true,
+      "repeat_restore_versions": 1,
+      "temporary_model_and_runs_deleted": true
+    },
+    "final_common_image_build_on_user_mac": {
+      "status": "passed",
+      "duration_seconds": 46.6,
+      "source": "user terminal output",
+      "app": "healthy",
+      "worker": "healthy",
+      "model_init_exit_code": 0
+    },
+    "source_load_after_final_rebuild": {
+      "status": "passed",
+      "batch_id": "669421ee-606e-486f-9fb8-585fdbddb1df",
+      "published": 120,
+      "rejected_publish_attempts": 470,
+      "elapsed_seconds": 229.142,
+      "wait_seconds": 226.269,
+      "batch_mean_rate_per_second": 0.524,
+      "trace_id": "2d50bc9d0fb858348a3e7319275b1c97",
+      "trace_services": [
+        "rentlens-source",
+        "rentlens-worker"
+      ],
+      "trace_spans": 17,
+      "trace_source_wait_spans": 5,
+      "queue_ready_after_run": 0,
+      "queue_unacked_after_run": 0,
+      "dlq_after_run": 0,
+      "steady_rate_window_utc": [
+        "20:32:00",
+        "20:33:30"
+      ],
+      "source_rates_per_second": [
+        0.473,
+        0.491,
+        0.473,
+        0.491
+      ],
+      "worker_rates_per_second": [
+        0.491,
+        0.473,
+        0.473,
+        0.491
+      ],
+      "note": "Broker nacks are retried publication attempts, not lost tasks. Initial queue filling raises the batch mean above the steady rate. Worker counter 240 at inspection includes other activity and is not attributed solely to this batch."
+    },
+    "memory_under_final_load": {
+      "source": "user-provided docker stats output",
+      "date": "2026-11-15",
+      "observation": "one sample while source was running; last source progress in the supplied output had elapsed_seconds=29.552",
+      "observability_mib": 722.61,
+      "observability_limit_mib": 1472,
+      "project_total_mib": 2035.83,
+      "csv": "measurements/observability-repairs-memory.csv",
+      "note": "Not a peak measurement. Unrelated Go PostgreSQL excluded. Blank configured limits in CSV mean no explicit per-service limit, rather than the shared Docker VM ceiling displayed by docker stats."
+    }
+  },
+  "regressions": [
+    "MLflow logs use JSON stdout",
+    "AMQP payload and authentication debug dumps are suppressed while application DEBUG remains enabled",
+    "successful PostgreSQL health check does not emit INFO",
+    "trace tests have deterministic sampling",
+    "existing READY champion is retained without requiring a snapshot",
+    "absent registered model or alias triggers snapshot restore",
+    "registry permission errors are propagated",
+    "unready champion is not overwritten",
+    "missing or corrupt snapshot prevents restore",
+    "real local MLflow registry restores matching predictions and repeated ensure does not add a version"
+  ],
+  "not_verified": [
+    "current-branch GitHub CI",
+    "live Grafana correlation UI after final changes; previous manual correlation check is recorded separately"
+  ],
+  "docker_limitation": "permission denied connecting to the host Docker socket from the agent session",
+  "historical_evidence": "hw5-validation.json records earlier full live scenarios; this file records repairs, automatic cold restore and the subsequent final build/load checks. Cold restore preceded final stdout cleanup; the corrected registration path was separately validated against the real MLflow REST server.",
+  "build_incident": {
+    "error": "input/output error while extracting a layer",
+    "host_free_disk_mib_at_inspection": 116,
+    "simultaneous_python_image_exports": 4,
+    "followup": "resolved: one shared image, no embedded uv cache, no recursive dependency ownership layer; final build and startup passed"
+  }
+}

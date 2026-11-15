@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import logging
 import os
 import shutil
 from datetime import UTC, datetime
@@ -11,8 +12,13 @@ from tempfile import TemporaryDirectory
 
 import mlflow
 import mlflow.sklearn
+from mlflow.exceptions import MlflowException
 from mlflow.models import Model
 from mlflow.tracking import MlflowClient
+
+from rentlens.logging_config import configure_logging
+
+logger = logging.getLogger(__name__)
 
 
 def file_hashes(directory: Path) -> dict[str, str]:
@@ -47,7 +53,7 @@ def export_snapshot(client: MlflowClient, directory: Path, name: str, alias: str
             and manifest["model_version"] == version.version
             and manifest["run_id"] == version.run_id
         ):
-            print("Проверен существующий снимок:", directory)
+            logger.info("Проверен существующий снимок: %s", directory)
             return
         raise FileExistsError("Выберите другую --directory для новой модели")
 
@@ -79,7 +85,7 @@ def export_snapshot(client: MlflowClient, directory: Path, name: str, alias: str
         )
         verify_snapshot(staging)
         staging.rename(directory)
-    print("Снимок сохранён и проверен:", directory)
+    logger.info("Снимок сохранён и проверен: %s", directory)
 
 
 def restore_snapshot(client: MlflowClient, directory: Path, name: str, alias: str):
@@ -99,7 +105,7 @@ def restore_snapshot(client: MlflowClient, directory: Path, name: str, alias: st
         metadata = Model.load(str(model_dir / "MLmodel"))
         model = mlflow.sklearn.load_model(str(model_dir))
         mlflow.set_experiment("rentlens-restored")
-        with mlflow.start_run(run_name="restore-champion"):
+        with mlflow.start_run(run_name="restore-champion") as run:
             mlflow.set_tags(
                 {
                     "snapshot.sha256": snapshot_hash,
@@ -113,20 +119,78 @@ def restore_snapshot(client: MlflowClient, directory: Path, name: str, alias: st
                 name="model",
                 signature=metadata.signature,
             )
-            version = mlflow.register_model(info.model_uri, name)
-        client.set_model_version_tag(
-            name, version.version, "snapshot.sha256", snapshot_hash
-        )
-        client.set_model_version_tag(
-            name, version.version, "algorithm", manifest["algorithm"]
-        )
+            try:
+                client.create_registered_model(name)
+            except MlflowException as error:
+                if error.error_code not in {
+                    "RESOURCE_ALREADY_EXISTS",
+                    "ALREADY_EXISTS",
+                }:
+                    raise
+            version = client.create_model_version(
+                name=name,
+                source=info.model_uri,
+                run_id=run.info.run_id,
+                model_id=info.model_id,
+                tags={
+                    "snapshot.sha256": snapshot_hash,
+                    "algorithm": manifest["algorithm"],
+                },
+            )
     client.set_registered_model_alias(name, alias, version.version)
-    print(f"Восстановлено: models:/{name}@{alias}, версия {version.version}")
+    logger.info(
+        "Модель восстановлена",
+        extra={
+            "event": "model_restored",
+            "model_name": name,
+            "model_alias": alias,
+            "model_version": version.version,
+        },
+    )
+    return version
+
+
+def ensure_model(client: MlflowClient, directory: Path, name: str, alias: str):
+    """Сохраняет существующий alias или восстанавливает его из снимка."""
+    try:
+        registered = client.get_registered_model(name)
+    except MlflowException as error:
+        if error.error_code != "RESOURCE_DOES_NOT_EXIST":
+            raise
+    else:
+        version_number = registered.aliases.get(alias)
+        if version_number is not None:
+            version = client.get_model_version(name, version_number)
+            if version.status != "READY":
+                raise RuntimeError(f"Модель {name}@{alias} ещё не готова")
+            logger.info(
+                "Используется существующая модель",
+                extra={
+                    "event": "model_already_ready",
+                    "model_name": name,
+                    "model_alias": alias,
+                    "model_version": version.version,
+                },
+            )
+            return version
+
+    if not (directory / "manifest.json").is_file():
+        logger.error(
+            "Рабочая модель и снимок отсутствуют: обучите и зарегистрируйте "
+            "champion или перенесите model-snapshots/champion",
+            extra={"event": "model_snapshot_missing"},
+        )
+        raise FileNotFoundError(
+            "В MLflow нет рабочей модели, а локальный снимок отсутствует. "
+            "Сначала обучите и зарегистрируйте champion или перенесите "
+            "model-snapshots/champion с проверенным manifest.json."
+        )
+    return restore_snapshot(client, directory, name, alias)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["export", "verify", "restore"])
+    parser.add_argument("action", choices=["export", "verify", "restore", "ensure"])
     parser.add_argument(
         "--directory", type=Path, default=Path("model-snapshots/champion")
     )
@@ -137,18 +201,25 @@ def main():
         default=os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000"),
     )
     args = parser.parse_args()
+    configure_logging()
     directory = args.directory.resolve()
     if args.action == "verify":
         verify_snapshot(directory)
-        print("Контрольные суммы совпадают:", directory)
+        logger.info("Контрольные суммы совпадают: %s", directory)
         return
     mlflow.set_tracking_uri(args.tracking_uri)
     client = MlflowClient()
     if args.action == "export":
         export_snapshot(client, directory, args.name, args.alias)
+    elif args.action == "ensure":
+        ensure_model(client, directory, args.name, args.alias)
     else:
         restore_snapshot(client, directory, args.name, args.alias)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        logger.exception("Ошибка подготовки снимка или модели")
+        raise SystemExit(1) from None
