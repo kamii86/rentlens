@@ -1,0 +1,4 @@
+ARG BASE_IMAGE=otel/opentelemetry-collector-contrib:0.165.0
+FROM busybox:1.37.0-musl AS healthcheck
+FROM ${BASE_IMAGE}
+COPY --from=healthcheck /bin/busybox /busybox

@@ -1,3 +1,6 @@
+include:
+  - ./observability/compose.yaml
+
 services:
   db:
     image: postgres:17-alpine

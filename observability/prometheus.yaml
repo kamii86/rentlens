@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 5s
+  scrape_timeout: 3s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: otel-applications
+    honor_labels: true
+    static_configs:
+      - targets: [otel-collector:8889]
+  - job_name: rabbitmq
+    metrics_path: /metrics/per-object
+    static_configs:
+      - targets: [rabbitmq:15692]
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]
+
+storage:
+  exemplars:
+    max_exemplars: 1000

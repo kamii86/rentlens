@@ -47,3 +47,4 @@ dist/
 /reports/test_predictions.csv
 /mlruns/
 /mlartifacts/
+/model-snapshots/

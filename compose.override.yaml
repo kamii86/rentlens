@@ -1,3 +1,23 @@
+x-telemetry: &telemetry
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-local}
+  OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  OTEL_EXPORTER_OTLP_TIMEOUT: "1"
+  OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-otlp}
+  OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-otlp}
+  OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_always_on}
+  OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
+  OTEL_METRIC_EXPORT_INTERVAL: ${OTEL_METRIC_EXPORT_INTERVAL:-5000}
+  OTEL_METRIC_EXPORT_TIMEOUT: "1000"
+  OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.version=0.1.1,deployment.environment.name=local}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "5m"
+    max-file: "3"
 
 services:
   rabbitmq:
@@ -9,17 +29,24 @@ services:
     ports:
       - "127.0.0.1:5672:5672"
       - "127.0.0.1:15672:15672"
+      - "127.0.0.1:15692:15692"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+      - ./observability/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
       interval: 5s
       timeout: 5s
       retries: 15
+    logging: *logging
     restart: unless-stopped
 
   app:
+    pull_policy: build
+    image: rentlens-app:${APP_IMAGE_TAG:-0.1.1-hw5}
     environment:
+      <<: *telemetry
+      OTEL_SERVICE_NAME: rentlens-api
       RABBITMQ_URL: amqp://rentlens:rentlens@rabbitmq:5672/
       QUEUE_MODE: ${QUEUE_MODE:-bounded}
       QUEUE_LIMIT: ${QUEUE_LIMIT:-10}
@@ -27,13 +54,24 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+    init: true
 
   worker:
+    pull_policy: build
+    image: rentlens-worker:${APP_IMAGE_TAG:-0.1.1-hw5}
     build:
       context: .
       dockerfile: Dockerfile
     command: ["faststream", "run", "rentlens.worker:app"]
     environment:
+      <<: *telemetry
+      OTEL_SERVICE_NAME: rentlens-worker
       DATABASE_URL: postgresql+asyncpg://rentlens:rentlens@db:5432/rentlens
       RABBITMQ_URL: amqp://rentlens:rentlens@rabbitmq:5672/
       MLFLOW_TRACKING_URI: http://mlflow:5000
@@ -44,8 +82,9 @@ services:
       PREFETCH_COUNT: ${PREFETCH_COUNT:-1}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
       INFERENCE_SECONDS: ${INFERENCE_SECONDS:-2.0}
-      MAX_ATTEMPTS: "3"
-      GRACEFUL_TIMEOUT: "40"
+      MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
+      GRACEFUL_TIMEOUT: ${GRACEFUL_TIMEOUT:-40}
+      WORKER_HEALTH_PORT: ${WORKER_HEALTH_PORT:-9000}
     depends_on:
       db:
         condition: service_healthy
@@ -53,9 +92,42 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('WORKER_HEALTH_PORT', '9000') + '/', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 30s
+    mem_limit: 1g
+    logging: *logging
+    init: true
     stop_signal: SIGTERM
-    stop_grace_period: 50s
+    stop_grace_period: ${STOP_GRACE_PERIOD:-50s}
     restart: unless-stopped
+
+  source:
+    pull_policy: build
+    image: rentlens-source:${APP_IMAGE_TAG:-0.1.1-hw5}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: [batch]
+    command: ["python", "-m", "rentlens.batch_source"]
+    environment:
+      <<: *telemetry
+      OTEL_SERVICE_NAME: rentlens-source
+      RABBITMQ_URL: amqp://rentlens:rentlens@rabbitmq:5672/
+      QUEUE_MODE: ${QUEUE_MODE:-bounded}
+      QUEUE_LIMIT: ${QUEUE_LIMIT:-10}
+      INFERENCE_SECONDS: ${INFERENCE_SECONDS:-2.0}
+      BATCH_COUNT: ${BATCH_COUNT:-120}
+    depends_on:
+      worker:
+        condition: service_healthy
+    mem_limit: 256m
+    logging: *logging
+    init: true
+    restart: "no"
 
 volumes:
   rabbitmq_data:

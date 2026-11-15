@@ -1,0 +1,166 @@
+{
+  "date": "2026-11-15",
+  "status": "validation completed on 2026-11-15; observation limits are documented per check",
+  "model": {
+    "run_id": "95984b27c9b14dd7ad2b65c66d0ce86e",
+    "model_uri": "models:/m-f34a3212c5e94b12a3ed941aa9f18ef5",
+    "algorithm": "RandomForestRegressor",
+    "validation_mae": 204.06,
+    "validation_rmse": 404.56,
+    "validation_r2": 0.7849
+  },
+  "task_trace": {
+    "task_id": "c36a1c54-aee9-419b-922f-1a250f418510",
+    "trace_id": "0ee7199ffc7b2fe60e69cab89bdefe03",
+    "status": "COMPLETED",
+    "attempts": 1,
+    "predicted_price": 1016.17,
+    "spans": [
+      "POST /api/v1/tasks",
+      "publish",
+      "db.record_accepted",
+      "queue.wait",
+      "process",
+      "db.start_attempt",
+      "inference",
+      "db.complete"
+    ]
+  },
+  "queue_overflow": {
+    "requests": 20,
+    "accepted_202": 10,
+    "rejected_503": 10,
+    "queue_limit": 10,
+    "alert_states": [
+      "Normal",
+      "Pending",
+      "Alerting",
+      "Normal"
+    ]
+  },
+  "dlq": {
+    "task_id": "8343db1d-b36f-4be5-8b94-5b16f6588525",
+    "trace_id": "3392af0b04686777c04cc3cc3783657f",
+    "attempts": 3,
+    "retry_events": 2,
+    "dlq_messages": 1,
+    "alert_state": "Alerting"
+  },
+  "scaling": {
+    "inference_seconds": 2,
+    "single_worker_observed_rate": 0.49,
+    "two_worker_observed_rates": [
+      0.473,
+      0.473
+    ],
+    "two_worker_total_observed_rate": 0.945,
+    "rate_window_seconds": 60
+  },
+  "graceful_shutdown": {
+    "task_id": "c5bfe95e-6b9d-4302-ab4c-c65bf3b8fbf8",
+    "trace_id": "23c774dda817bdbbc5ba1a6729f00482",
+    "shutdown_started_utc": "09:18:19.327",
+    "task_completed_utc": "09:18:21.121",
+    "shutdown_completed_utc": "09:18:21.136",
+    "exit_code": 0
+  },
+  "telemetry_outage": {
+    "stopped_services": [
+      "otel-collector",
+      "loki"
+    ],
+    "task_id": "efbda6d5-4f26-4c07-ac6b-f47ad9cd1d94",
+    "http_status": 202,
+    "status": "COMPLETED",
+    "attempts": 1,
+    "predicted_price": 945.32,
+    "created_at": "2026-11-15T09:20:50.305293Z",
+    "finished_at": "2026-11-15T09:20:52.429544Z"
+  },
+  "snapshot_tool_smoke": {
+    "temporary_model_only": true,
+    "sha256_tamper_detection": true,
+    "restored_predictions_identical": true,
+    "repeated_restore_keeps_one_version": true
+  },
+  "cardinality_observation": {
+    "current_application_series": 76,
+    "application_series_seen_last_30m": 167
+  },
+  "unit_checks": {
+    "passed": 86,
+    "coverage_percent": 91.62,
+    "excluded": "tests/test_queue_integration.py: requires Docker daemon",
+    "ruff": "check and format passed"
+  },
+  "full_checks": {
+    "passed": 87,
+    "coverage_percent": 92.59,
+    "docker_testcontainers_included": true,
+    "ruff_check": "passed",
+    "ruff_format": "49 files already formatted",
+    "warnings": [
+      "Testcontainers deprecation warning"
+    ]
+  },
+  "actual_champion_snapshot": {
+    "verified": true,
+    "files": 8,
+    "bytes": 187611672,
+    "run_id": "95984b27c9b14dd7ad2b65c66d0ce86e",
+    "model_version": "1"
+  },
+  "cold_start": {
+    "verified": true,
+    "restored_run_id": "1bb2f2b5797544479152b71a73c4ddac",
+    "restored_model_version": "1",
+    "snapshot_sha256": "a57f4c493c29a6431a8ab3c61503b98a4ea1070a107444848261a4fd9c0ab2b8",
+    "http_status": 202,
+    "task": {
+      "task_id": "545aaaec-d4e3-4a2d-97e9-e7f9715e880c",
+      "status": "COMPLETED",
+      "attempts": 1,
+      "predicted_price": 945.32,
+      "currency": "USD",
+      "error": null,
+      "created_at": "2026-11-15T10:36:51.824263Z",
+      "finished_at": "2026-11-15T10:36:53.986431Z"
+    },
+    "prediction_matches_pre_reset": true,
+    "dashboard_provisioned": true,
+    "panels": 18,
+    "datasources": [
+      "loki",
+      "prometheus",
+      "tempo"
+    ],
+    "alert_rules": 2,
+    "interruption": "Docker daemon became unavailable while host disk had 932 MiB free; recovered after freeing space and forcing Docker Desktop restart"
+  },
+  "grafana_correlation": {
+    "verified_in_ui": true,
+    "task_id": "92650c72-409e-4e21-9626-596465f98f5a",
+    "trace_id": "374848d8d10f707cee1570ed9e8da029",
+    "spans": 17,
+    "queue_wait_seconds": 19.33,
+    "inference_seconds": 2.05,
+    "related_log_lines": 15,
+    "indexed_loki_labels": [
+      "env",
+      "level",
+      "service"
+    ],
+    "screenshot": "measurements/hw5-grafana-correlation.jpg"
+  },
+  "memory_observation": {
+    "source": "user docker stats --no-stream output",
+    "date": "2026-11-15",
+    "source_running_seconds": 24,
+    "worker_count": 1,
+    "observability_memory_mib": 762.98,
+    "observability_limit_mib": 1472,
+    "total_project_memory_mib": 2397.15,
+    "csv": "measurements/hw5-memory.csv",
+    "note": "one sample under load; excludes unrelated Go PostgreSQL container; blank configured limits mean the shared Docker VM memory ceiling was displayed instead"
+  }
+}

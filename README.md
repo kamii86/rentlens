@@ -7,6 +7,36 @@ RentLens — учебный сервис прогнозирования меся
 
 Проект включает подготовку данных, EDA, обучение и сравнение моделей, отслеживание экспериментов в MLflow, Model Registry и асинхронный API на FastAPI.
 
+## ДЗ №5: наблюдаемость
+
+Добавлены JSON-логи с контекстом задачи, распределённые трейсы OpenTelemetry,
+прикладные метрики и Docker-профили Loki/Alloy, Tempo, Prometheus и Grafana.
+Дашборд, источники данных, связи логов и трейсов и два алерта создаются из файлов.
+
+Запуск, бюджет ресурсов, кардинальность, проверенные сценарии и восстановление
+после удаления томов описаны в [observability/README.md](observability/README.md).
+Факты ручных проверок сохранены в
+[measurements/hw5-validation.json](measurements/hw5-validation.json).
+
+Проверено: 87 тестов, покрытие 92,59%; переполнение/503, retry/DLQ,
+два воркера, SIGTERM во время inference, работа без Collector/Loki,
+восстановление champion после удаления томов и связи логов с трейсами в Grafana.
+По замеру под нагрузкой стек наблюдаемости использовал 762,98 МиБ
+при суммарном лимите 1472 МиБ.
+
+Перед удалением томов сохраните рабочую модель на хост:
+
+```bash
+uv run python scripts/model_snapshot.py export
+uv run python scripts/model_snapshot.py verify
+```
+
+Снимок в `model-snapshots/champion` содержит модель с preprocessing, метаданные
+и SHA-256 каждого файла. Он исключён из Git и сохраняется при `docker compose down -v`.
+При пустом MLflow команда `uv run python scripts/model_snapshot.py restore`
+создаёт новый Run, загружает артефакты на сервер, регистрирует версию и назначает
+`rentlens-price@champion`. Старые идентификаторы Run не требуются.
+
 ## Возможности
 
 - очистка датасета и отчёт об исключённых объявлениях;

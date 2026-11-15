@@ -1,0 +1,70 @@
+logging {
+  level  = "info"
+  format = "json"
+}
+
+discovery.docker "project" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "2s"
+  filter {
+    name   = "label"
+    values = [sys.env("COMPOSE_PROJECT_FILTER")]
+  }
+}
+
+discovery.relabel "pipeline" {
+  targets = discovery.docker.project.targets
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "app|worker|source"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+  rule {
+    target_label = "env"
+    replacement  = sys.env("DEPLOYMENT_ENVIRONMENT")
+  }
+  rule {
+    target_label = "level"
+    replacement  = "INFO"
+  }
+}
+
+loki.source.docker "pipeline" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.pipeline.output
+  forward_to = [loki.process.pipeline.receiver]
+}
+
+loki.process "pipeline" {
+  stage.json {
+    expressions = {
+      service = "service",
+      level   = "level",
+      env     = "env",
+    }
+  }
+  stage.labels {
+    values = {
+      service = "service",
+      level   = "level",
+      env     = "env",
+    }
+  }
+  stage.label_keep {
+    values = ["service", "level", "env"]
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  max_streams = 100
+  endpoint {
+    url        = sys.env("LOKI_PUSH_URL")
+    batch_wait = "1s"
+    batch_size = "64KiB"
+  }
+}

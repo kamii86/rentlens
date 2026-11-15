@@ -1,0 +1,14 @@
+service,memory_mib,configured_limit_mib,cpu_percent,group
+otel-collector,67.17,128,0.45,observability
+tempo,81.88,320,0.4,observability
+prometheus,120.1,256,0.7,observability
+loki,124.8,256,1.26,observability
+alloy,77.63,192,0.79,observability
+grafana,291.4,320,0.93,observability
+source,43.07,256,1.75,application
+app,143.0,512,0.15,application
+worker,643.6,1024,3.62,application
+mlflow,625.0,,1.0,application
+db,27.57,512,0.07,application
+mlflow-db,36.03,,2.05,application
+rabbitmq,115.9,,0.61,application

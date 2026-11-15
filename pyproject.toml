@@ -42,6 +42,10 @@ web = [
     "uvicorn[standard]>=0.54.0",
     "faststream[rabbit,cli]==0.6.7",
     "aio-pika>=9.5.0",
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1",
+    "psutil>=7.2.2",
 ]
 
 [tool.ruff]

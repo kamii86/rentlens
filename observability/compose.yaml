@@ -1,0 +1,204 @@
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "5m"
+    max-file: "3"
+
+x-health: &health
+  interval: 5s
+  timeout: 3s
+  retries: 24
+  start_period: 15s
+
+services:
+  otel-collector:
+    pull_policy: build
+    image: rentlens-otel-collector:${OTEL_COLLECTOR_VERSION:-0.165.0}
+    build:
+      context: .
+      dockerfile: Dockerfile.health
+      args:
+        BASE_IMAGE: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.165.0}
+    profiles: [traces, metrics, observability]
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    environment:
+      GOMEMLIMIT: 96MiB
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:13133:13133"
+    mem_limit: 128m
+    healthcheck:
+      <<: *health
+      test: ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:13133/"]
+    logging: *logging
+    restart: unless-stopped
+
+  tempo:
+    pull_policy: build
+    image: rentlens-tempo:${TEMPO_VERSION:-2.10.7}
+    build:
+      context: .
+      dockerfile: Dockerfile.health
+      args:
+        BASE_IMAGE: grafana/tempo:${TEMPO_VERSION:-2.10.7}
+    profiles: [traces, observability]
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    environment:
+      GOMEMLIMIT: 256MiB
+    volumes:
+      - ./tempo.yaml:/etc/tempo/config.yaml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "127.0.0.1:3200:3200"
+    mem_limit: 320m
+    healthcheck:
+      <<: *health
+      test: ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3200/ready"]
+    logging: *logging
+    restart: unless-stopped
+
+  prometheus:
+    pull_policy: build
+    image: rentlens-prometheus:${PROMETHEUS_VERSION:-v3.16.0}
+    build:
+      context: .
+      dockerfile: Dockerfile.health
+      args:
+        BASE_IMAGE: prom/prometheus:${PROMETHEUS_VERSION:-v3.16.0}
+    profiles: [metrics, observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yaml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=48h
+      - --storage.tsdb.retention.size=256MB
+      - --query.max-concurrency=4
+      - --enable-feature=exemplar-storage
+      - --log.format=json
+    environment:
+      GOMEMLIMIT: 192MiB
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    mem_limit: 256m
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      <<: *health
+      test: ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+    logging: *logging
+    restart: unless-stopped
+
+  loki:
+    pull_policy: build
+    image: rentlens-loki:${LOKI_VERSION:-3.6.20}
+    build:
+      context: .
+      dockerfile: Dockerfile.health
+      args:
+        BASE_IMAGE: grafana/loki:${LOKI_VERSION:-3.6.20}
+    profiles: [logs, observability]
+    command: ["-config.file=/etc/loki/config.yaml"]
+    environment:
+      GOMEMLIMIT: 192MiB
+    volumes:
+      - ./loki.yaml:/etc/loki/config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    mem_limit: 256m
+    healthcheck:
+      <<: *health
+      test: ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3100/ready"]
+    logging: *logging
+    restart: unless-stopped
+
+  alloy:
+    user: "0:0"
+    pull_policy: build
+    image: rentlens-alloy:${ALLOY_VERSION:-v1.21.2}
+    build:
+      context: .
+      dockerfile: Dockerfile.health
+      args:
+        BASE_IMAGE: grafana/alloy:${ALLOY_VERSION:-v1.21.2}
+    profiles: [logs, observability]
+    command:
+      - run
+      - --disable-reporting
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy
+      - /etc/alloy/config.alloy
+    environment:
+      GOMEMLIMIT: 128MiB
+      COMPOSE_PROJECT_FILTER: com.docker.compose.project=${COMPOSE_PROJECT_NAME}
+      DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-local}
+      LOKI_PUSH_URL: http://loki:3100/loki/api/v1/push
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy
+    ports:
+      - "127.0.0.1:12345:12345"
+    mem_limit: 192m
+    depends_on:
+      loki:
+        condition: service_healthy
+    healthcheck:
+      <<: *health
+      test: ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:12345/-/ready"]
+    logging: *logging
+    restart: unless-stopped
+
+  grafana:
+    pull_policy: build
+    image: rentlens-grafana:${GRAFANA_VERSION:-13.3.1}
+    build:
+      context: .
+      dockerfile: Dockerfile.health
+      args:
+        BASE_IMAGE: grafana/grafana:${GRAFANA_VERSION:-13.3.1}
+    profiles: [observability]
+    environment:
+      GOMEMLIMIT: 240MiB
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-rentlens-local-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_SMTP_ENABLED: "false"
+      GF_LOG_MODE: console
+      GF_LOG_CONSOLE_FORMAT: json
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    mem_limit: 320m
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    healthcheck:
+      <<: *health
+      test: ["CMD", "/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+    logging: *logging
+    restart: unless-stopped
+
+volumes:
+  tempo_data:
+  prometheus_data:
+  loki_data:
+  alloy_data:
+  grafana_data:

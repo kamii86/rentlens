@@ -1,0 +1,156 @@
+apiVersion: 1
+groups:
+- orgId: 1
+  name: RentLens pipeline
+  folder: RentLens
+  interval: 10s
+  rules:
+  - uid: rentlens_queue_full
+    title: Очередь заполнена более чем на 90%
+    condition: C
+    for: 1m
+    noDataState: OK
+    execErrState: Error
+    isPaused: false
+    annotations:
+      summary: Очередь заполнена более чем на 90%
+      description: Средняя за 30 секунд глубина превышает 90% лимита в течение минуты.
+        Сглаживание учитывает колебания очереди при адаптивной публикации.
+      __dashboardUid__: rentlens-pipeline
+      __panelId__: '5'
+    labels:
+      project: rentlens
+      severity: warning
+    data:
+    - refId: A
+      datasourceUid: prometheus
+      relativeTimeRange:
+        from: 120
+        to: 0
+      model:
+        datasource: &id001
+          type: prometheus
+          uid: prometheus
+        expr: sum(avg_over_time(rabbitmq_queue_messages_ready{queue="rentlens.tasks.bounded"}[30s]))
+          / max(rentlens_queue_limit_ratio{queue="rentlens.tasks.bounded"})
+        instant: true
+        range: false
+        refId: A
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        expression: A
+        refId: B
+        type: reduce
+        reducer: last
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        expression: B
+        refId: C
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        conditions:
+        - evaluator:
+            params:
+            - 0.9
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query
+  - uid: rentlens_dlq_nonempty
+    title: В DLQ появились сообщения
+    condition: C
+    for: 10s
+    noDataState: OK
+    execErrState: Error
+    isPaused: false
+    annotations:
+      summary: В DLQ появились сообщения
+      description: Хотя бы одно сообщение остаётся в DLQ более 10 секунд. DLQ требует
+        разбора причины ошибки, а не бесконечных повторов.
+      __dashboardUid__: rentlens-pipeline
+      __panelId__: '16'
+    labels:
+      project: rentlens
+      severity: critical
+    data:
+    - refId: A
+      datasourceUid: prometheus
+      relativeTimeRange:
+        from: 120
+        to: 0
+      model:
+        datasource: *id001
+        expr: sum(rabbitmq_queue_messages_ready{queue="rentlens.dlq"})
+        instant: true
+        range: false
+        refId: A
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        expression: A
+        refId: B
+        type: reduce
+        reducer: last
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        datasource:
+          type: __expr__
+          uid: __expr__
+        expression: B
+        refId: C
+        type: threshold
+        intervalMs: 1000
+        maxDataPoints: 43200
+        conditions:
+        - evaluator:
+            params:
+            - 0
+            type: gt
+          operator:
+            type: and
+          query:
+            params:
+            - C
+          reducer:
+            params: []
+            type: last
+          type: query

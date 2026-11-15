@@ -1,0 +1,315 @@
+# Наблюдаемость RentLens
+
+Стек дополняет конвейер ДЗ №4: API/источник → RabbitMQ → FastStream → модель из MLflow → PostgreSQL.
+
+## Компоненты и бюджет
+
+| Компонент | Роль | Порт на localhost | Лимит памяти |
+|---|---|---:|---:|
+| OpenTelemetry Collector 0.165.0 | OTLP, ограничение памяти, пакетная отправка | 4318, 13133 | 128 МиБ |
+| Tempo 2.10.7 | Хранение трейсов | 3200 | 320 МиБ |
+| Prometheus 3.16.0 | Хранение метрик | 9090 | 256 МиБ |
+| Loki 3.6.20 | Хранение логов | 3100 | 256 МиБ |
+| Alloy 1.21.2 | Чтение Docker-логов | 12345 | 192 МиБ |
+| Grafana 13.3.1 | Дашборд, корреляция, алерты | 3000 | 320 МиБ |
+
+Итого лимиты стека наблюдаемости: 1472 МиБ (1,4375 ГиБ). Это бюджет только наблюдаемости: RabbitMQ, PostgreSQL, MLflow и Python-процессы учитываются отдельно. Проверять фактическое потребление нужно под нагрузкой:
+
+```bash
+docker stats --no-stream
+```
+
+В ручном прогоне 15 ноября 2026 после восстановления томов источник работал
+около 25 секунд, INFERENCE_SECONDS=2, один воркер. Получен следующий разовый
+замер `docker stats --no-stream`:
+
+| Сервис | Использовано, МиБ | Лимит, МиБ |
+|---|---:|---:|
+| Collector | 67,17 | 128 |
+| Tempo | 81,88 | 320 |
+| Prometheus | 120,10 | 256 |
+| Loki | 124,80 | 256 |
+| Alloy | 77,63 | 192 |
+| Grafana | 291,40 | 320 |
+| **Итого наблюдаемость** | **762,98** | **1472** |
+
+Вне этого бюджета API использовал 143 МиБ, воркер 643,6 МиБ,
+источник 43,07 МиБ, MLflow 625 МиБ, PostgreSQL приложения 27,57 МиБ,
+PostgreSQL MLflow 36,03 МиБ, RabbitMQ 115,9 МиБ. Всего RentLens — 2397,15 МиБ.
+Это снимок текущего потребления, а не максимальная память за весь запуск;
+у Grafana в этом замере занято около 91% её лимита.
+Исходные числа сохранены в `measurements/hw5-memory.csv`.
+
+У Loki, Tempo и Prometheus retention 48 часов. У Prometheus дополнительно ограничен размер TSDB. Данные хранятся в именованных томах. В образы добавлен статический BusyBox для HTTP health-check; версии исходных образов закреплены.
+
+## Профили
+
+```bash
+docker compose up -d
+docker compose --profile logs up -d
+docker compose --profile traces up -d
+docker compose --profile metrics up -d
+docker compose --profile observability up -d
+```
+
+Сервисы приложения не зависят через depends_on от наблюдаемости. Источник запускается явно как пакетный процесс, чтобы обычный up не создавал тестовую нагрузку.
+
+В `.env` по умолчанию `OTEL_SDK_DISABLED=true`: приложение пишет JSON в stdout и работает без Collector. Для сбора сигналов установите `OTEL_SDK_DISABLED=false` и пересоздайте app/worker/source. Экспортеры можно независимо отключить через `OTEL_TRACES_EXPORTER=none` и `OTEL_METRICS_EXPORTER=none`.
+
+При полном запуске предварительно нужна рабочая модель `rentlens-price@champion` в MLflow. Подготовка модели описана в основном README. Удаление томов через `docker compose down -v` удаляет также метаданные и артефакты MLflow. Процедура сохранения и восстановления приведена ниже.
+
+## Логи
+
+Используется стандартный logging с JSON-форматтером: он охватывает и приложение, и библиотечные логи. Уровень задаётся LOG_LEVEL. Входные записи и пароли из DSN не выводятся; ошибки сохраняют тип и стек без значений входных данных.
+
+Alloy читает Docker API через сокет, смонтированный read-only. Docker discovery отбирает только `com.docker.compose.project` текущего проекта и сервисы app/worker/source. Индексируемые метки Loki: service, level, env. task_id, batch_id, trace_id, span_id и instance остаются полями JSON. Автоматическое добавление Loki service_name отключено, чтобы набор меток оставался явным.
+
+Поиск истории задачи:
+
+```logql
+{service=~"rentlens-.+"} | json | task_id="ЗАМЕНИТЕ_НА_TASK_ID"
+```
+
+Все ошибки за 15 минут: выбрать диапазон времени 15m и выполнить:
+
+```logql
+{service=~"rentlens-.+",level=~"ERROR|CRITICAL"} | json
+```
+
+События DLQ и остановки:
+
+```logql
+{service=~"rentlens-.+"} | json | event=~"task_dlq|shutdown_started|shutdown_completed"
+```
+
+## Трейсы
+
+Каждая задача источника начинает отдельный корневой спан source.task. Повторы публикации и source.wait входят в тот же трейс. Пакет связывается через batch.id, без общего трейса на тысячи задач.
+
+API извлекает W3C-контекст запроса. Издатель передаёт traceparent в RabbitMQ headers, а task_id — в теле, заголовке и correlation_id. Воркер извлекает контекст и создаёт process. Inference выполняется в executor с copy_context, поэтому и спан, и контекст логов сохраняются в потоке. Запись в БД, повторные попытки и DLQ видны в том же trace_id.
+
+queue.wait измеряет интервал от подготовки публикации до первого получения сообщения, включая передачу по сети; это приближение ожидания в очереди, а не внутренний таймер брокера. Для повторных доставок этот интервал повторно не создаётся.
+
+На стенде используется parentbased_always_on: сохраняются все новые трейсы и решение родителя при входящем контексте. Для большого трафика можно применять parentbased_traceidratio; head sampling может потерять ошибочные трейсы. Для сохранения всех ошибок нужен отдельно спроектированный tail sampling с бюджетом памяти и задержкой принятия решения.
+
+В Grafana из поля TraceID открывается Tempo, а из спана — логи всего трейса. В логах instance совпадает с service.instance.id SDK, поэтому два воркера различимы.
+
+## Метрики
+
+Python-процессы отправляют накопительные OTLP-метрики в Collector; Prometheus опрашивает exporter Collector и плагин RabbitMQ каждые 5 секунд. Push выбран для Python, поскольку источник может завершиться между двумя pull-опросами. При завершении SDK делает финальную отправку; Collector сохраняет последнюю серию до 2 минут. Затем ряд источника исчезает из текущих значений, но история остаётся в Prometheus.
+
+Глубина рабочей очереди, DLQ и unacked берутся из `/metrics/per-object` RabbitMQ. OTLP-инструмент `rentlens_queue_limit` отражает объявленную приложением ёмкость; в unbounded режиме не создаётся. В Prometheus он называется `rentlens_queue_limit_ratio`: переводчик Collector добавляет суффикс для gauge с единицей `1`. Значение этого инструмента — количество задач, например 10; деление глубины на лимит выполняется в выражении алерта. Память процессов измеряется как RSS через psutil.
+
+Гистограммы используют секунды. У inference границы включают значения около INFERENCE_SECONDS, например 2,0 и 2,1 при задержке 2 секунды. Перцентили считаются после объединения бакетов, а не усредняются между воркерами.
+
+Примеры запросов:
+
+```promql
+sum(rate(rentlens_source_published_total[1m]))
+sum(rate(rentlens_worker_tasks_total{result="ok"}[1m]))
+sum by (service_instance_id) (rate(rentlens_worker_tasks_total{result="ok"}[1m]))
+histogram_quantile(0.95, sum by (le) (rate(rentlens_worker_inference_seconds_bucket[1m])))
+sum(rabbitmq_queue_messages_ready{queue="rentlens.tasks.bounded"})
+count({__name__=~"rentlens_.*"})
+```
+
+При сравнении одного и двух воркеров нужны установившийся режим и одинаковое INFERENCE_SECONDS. Начальное заполнение и конечное опустошение очереди временно нарушают равенство скоростей. После масштабирования дашборд не редактируется.
+
+### Кардинальность
+
+View оставляет только заранее разрешённые ключи атрибутов. HTTP использует шаблон маршрута, а неизвестные пути объединяются в unmatched; нестандартные методы — в OTHER. task_id и trace_id не допускаются как атрибуты рядов.
+
+Оценка для R маршрутов, M методов, S кодов ответа: counter API даёт до R×M×S рядов; histogram API — R×M×(B_API+3), где добавлены +Inf, sum, count. Для INFERENCE_SECONDS=2 у inference 18 конечных границ, то есть 21 ряд на воркер. Counter результата добавляет 3 ряда на воркер, inflight/redeliveries/duplicates — ещё 3.
+
+Пример с R=6, M=2, S=6, двумя воркерами, одним API и одним источником: API 72+168, воркеры 54, источник 3, память и лимит 8 — около 305 прикладных рядов. Это иллюстрация произведения значений меток; реальные комбинации разрежены. Служебные ряды SDK/Collector, RabbitMQ и Prometheus считаются отдельно. Фактическое число прикладных рядов видно запросом count выше.
+
+После ручных проверок 15 ноября наблюдалось 76 текущих прикладных рядов и 167 уникальных наборов меток за предыдущие 30 минут. За это время воркеры и источник перезапускались; ресурсы разных процессов образуют отдельные ряды. Значение task_id в метках умножило бы число рядов на число задач и нарушило бы этот бюджет; идентификаторы остаются в логах и трейсах.
+
+## Grafana и алерты
+
+Дашборд `RentLens — Конвейер`, три datasources и правила создаются из файлов provisioning. Их не нужно настраивать кликами. Локальные данные входа задаются GRAFANA_ADMIN_USER/GRAFANA_ADMIN_PASSWORD; значения по умолчанию admin / rentlens-local-admin. SMTP отключён, проверяется состояние Firing в UI.
+
+Правила:
+
+- Рабочая очередь: средняя глубина за 30 секунд выше 90% лимита непрерывно 1 минуту. Усреднение сглаживает колебания на одну задачу при адаптивной публикации; for отсекает кратковременные всплески.
+- DLQ: число сообщений больше нуля 10 секунд. Это проверка наличия неразобранных ошибок, а не rate от gauge.
+
+Отсутствующие очереди дают NoData→OK, поэтому пустой стенд не создаёт ложных алертов. Ошибка исполнения запроса остаётся Error и требует проверки хранилища.
+
+## Недоступность телеметрии
+
+Трейсы экспортируются в фоне, очередь SDK ограничена 512 спанами. Collector применяет memory_limiter перед batch; очередь повторной отправки в Tempo ограничена. При длительном отказе часть трейсов теряется. Накопительные счётчики и бакеты метрик могут восстановить агрегированные значения после следующей успешной отправки, но промежуточная временная детализация будет потеряна. Логи остаются в Docker в пределах ротации; позиции Alloy сохраняются в отдельном томе. При исчерпании буферов/ротации возможна потеря телеметрии, поэтому её нельзя считать журналом транзакций.
+
+Остановка Collector или Loki не меняет подтверждения RabbitMQ и фиксацию результатов в PostgreSQL. Уведомления и внешняя доставка алертов для стенда не настраиваются.
+
+## Проверенные сценарии 15 ноября 2026
+
+| Проверка | Наблюдавшийся результат |
+|---|---|
+| HTTP → RabbitMQ → inference → PostgreSQL | Задача `c36a1c54-aee9-419b-922f-1a250f418510`: COMPLETED, 1 попытка, $1016.17; один trace_id в API и worker; 8 спанов в Tempo |
+| Переполнение при остановленном воркере | 20 POST: 10 ответов 202 и 10 ответов 503; очередь 10/10; алерт Normal → Pending → Alerting; после запуска очередь опустела и алерт вернулся в Normal |
+| Некорректная задача | `8343db1d-b36f-4be5-8b94-5b16f6588525`: три ошибки, два retry, затем DLQ; все попытки с одним trace_id; DLQ=1 и алерт Alerting |
+| Масштабирование | Один воркер около 0,49 задачи/с; два — примерно по 0,47, суммарно 0,945 задачи/с при INFERENCE_SECONDS=2 |
+| SIGTERM при активном inference | `c5bfe95e-6b9d-4302-ab4c-c65bf3b8fbf8`: shutdown_started 09:18:19.327 UTC → task_completed 09:18:21.121 UTC → shutdown_completed 09:18:21.136 UTC; ExitCode=0 |
+| Collector и Loki остановлены | `efbda6d5-4f26-4c07-ac6b-f47ad9cd1d94`: HTTP 202, COMPLETED за 2,124 с, 1 попытка, $945.32 |
+| Запуск после down -v | Champion восстановлен из проверенного снимка; приложение и стек healthy, provisioning создал 18 панелей, 3 datasource и 2 алерта. Новый API-запрос `545aaaec-d4e3-4a2d-97e9-e7f9715e880c` завершился за одну попытку с тем же прогнозом $945.32 |
+| Связь логов и трейсов в UI | Задача `92650c72-409e-4e21-9626-596465f98f5a`: TraceID открывает Tempo; Related logs открывает Loki с 15 строками того же trace_id. В трейсе 17 спанов: queue.wait 19,33 с, inference 2,05 с |
+
+История хранится 48 часов; после удаления томов эти сигналы нужно получить повторным запуском сценариев. Числа выше относятся к конкретному ручному прогону, а не к универсальному бенчмарку. Файл `measurements/hw5-validation.json` сохраняет идентификаторы и результаты.
+
+После перезапуска SDK создаёт новый service.instance.id. Последние значения завершённого процесса могут отображаться до истечения кеша Collector (2 минуты); это не дополнительный живой воркер. Для проверки активности используйте `rate` и inflight, а для числа контейнеров — `docker compose ps worker`.
+
+## Снимок модели и запуск после удаления томов
+
+Сначала, при работающем MLflow и доступном champion:
+
+```bash
+uv run python scripts/model_snapshot.py export
+uv run python scripts/model_snapshot.py verify
+```
+
+Путь по умолчанию — `model-snapshots/champion` в корне проекта. Снимок хранится
+на хосте, а не в Docker volume. Перенос проекта на другой компьютер требует
+переноса этой директории или повторного обучения на исходном датасете UCI.
+Скрипт проверяет целостность, повторное восстановление того же снимка не создаёт
+новую версию модели. URI задаётся через `--tracking-uri` или MLFLOW_TRACKING_URI;
+по умолчанию используется `http://127.0.0.1:5000`.
+
+Перед запуском подготовьте образы. Если они уже собраны из текущих исходников,
+повторять build не требуется. Сборка выполняется до удаления томов и отдельно
+от запуска всего стека; последовательный build снижает конкуренцию за ресурсы:
+
+```bash
+COMPOSE_PARALLEL_LIMIT=1 docker compose --profile observability --profile batch build
+```
+
+После успешной проверки снимка можно воспроизвести запуск с пустыми томами
+из подготовленных образов:
+
+```bash
+docker compose --profile observability --profile batch down -v --remove-orphans
+docker compose up -d --no-build --pull never --wait --wait-timeout 180 db rabbitmq mlflow
+uv run python scripts/model_snapshot.py restore
+docker compose --profile observability up -d --no-build --pull never --wait --wait-timeout 180 \
+  otel-collector tempo prometheus loki alloy grafana
+docker compose up -d --no-build --pull never --wait --wait-timeout 180 app worker
+docker compose --profile batch up -d --no-build --pull never --no-deps source
+```
+
+В `.env` для этого сценария должно быть `OTEL_SDK_DISABLED=false`. После запуска
+снова доступны три datasource, дашборд и два правила алертов без настройки через UI.
+Этот сценарий проверен с настоящим champion. При повторном старте на хосте
+осталось 932 МиБ свободного места и перестал отвечать Docker daemon. После
+освобождения места и перезапуска Docker Desktop из уже готовых образов
+сервисы стали healthy, модель и provisioning восстановились. Для повторения
+проверьте свободное место командой `df -h .`; на этом стенде для сборки
+и работы Docker желательно иметь запас хотя бы 10–15 ГБ на хосте.
+
+После восстановления `rentlens-price@champion` имеет READY и новый Run ID
+`1bb2f2b5797544479152b71a73c4ddac`. SHA-256 снимка:
+`a57f4c493c29a6431a8ab3c61503b98a4ea1070a107444848261a4fd9c0ab2b8`.
+Номера версий и Run ID на другой машине могут отличаться; приложение использует alias.
+
+Снимок проверки UI: [трейс и связанные логи](../measurements/hw5-grafana-correlation.jpg).
+
+## Команды для демонстрации
+
+### Нагрузка и два воркера
+
+```bash
+docker compose --profile batch up -d --build --no-deps source
+# Дождаться примерно минуты установившейся нагрузки с одним воркером.
+docker compose up -d --no-deps --no-build --scale worker=2 \
+  --wait --wait-timeout 180 worker
+```
+
+Если источник уже завершился, для нового пакета используйте `docker compose restart source`.
+Сравнивайте суммарную скорость и скорость по service.instance.id, пока очередь не пуста.
+
+### Переполнение и HTTP 503
+
+```bash
+docker compose stop worker
+for i in {1..20}; do
+  curl -sS -o /dev/null -w '%{http_code}\n' \
+    -X POST http://127.0.0.1:8000/api/v1/tasks \
+    -H 'Content-Type: application/json' \
+    -d '{"square_feet":900,"bedrooms":2,"bathrooms":1}'
+done | sort | uniq -c
+# Подождать срабатывания алерта (примерно 90 секунд).
+docker compose start worker
+```
+
+Для пустой очереди с лимитом 10 ожидаются 10 ответов 202 и 10 ответов 503.
+Если источник продолжает публикацию, распределение ответов меняется, но предел ready остаётся тем же.
+
+### Три попытки и DLQ
+
+```bash
+docker compose exec -T app python - <<'PY'
+import asyncio
+from uuid import uuid4
+from rentlens.task_broker import TaskPublisher
+from rentlens.telemetry import configure_telemetry, shutdown_telemetry
+
+async def main():
+    configure_telemetry("rentlens-api")
+    publisher = TaskPublisher()
+    task_id = str(uuid4())
+    try:
+        await publisher.start()
+        await publisher.publish(task_id, {"square_feet": -1})
+        print("task_id:", task_id)
+    finally:
+        await publisher.close()
+        await asyncio.to_thread(shutdown_telemetry)
+
+asyncio.run(main())
+PY
+docker compose logs --tail 30 worker
+```
+
+API отвергает отрицательную площадь до публикации, поэтому для проверки воркера сообщение отправляется напрямую в брокер. Повторная доставка сохраняет traceparent исходного сообщения. После MAX_ATTEMPTS задача имеет статус FAILED в БД, сообщение попадает в DLQ. Тестовое сообщение остаётся в DLQ для разбора; повторный запуск добавляет ещё одно.
+
+### SIGTERM и отключение телеметрии
+
+Во время нагрузки выберите один из двух контейнеров и остановите его:
+
+```bash
+worker_id=$(docker compose ps -q worker | tail -n 1)
+docker stop -t 50 "$worker_id"
+docker logs --tail 25 "$worker_id"
+docker inspect --format 'ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}}' "$worker_id"
+docker compose start worker
+```
+
+Для активной задачи task_completed должен находиться между shutdown_started и shutdown_completed. Остановка простаивающего процесса проверяет только освобождение ресурсов.
+
+```bash
+docker compose --profile observability stop otel-collector loki
+curl -i -X POST http://127.0.0.1:8000/api/v1/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"square_feet":900,"bedrooms":2,"bathrooms":1}'
+curl http://127.0.0.1:8000/api/v1/tasks/ЗАМЕНИТЕ_НА_TASK_ID
+docker compose --profile observability start otel-collector loki
+```
+
+Дождитесь COMPLETED через GET перед возвращением Collector и Loki. Данные о результате берутся из PostgreSQL, даже когда телеметрия недоступна.
+
+## Итоговые проверки
+
+```bash
+uv run --group web ruff check .
+uv run --group web ruff format --check .
+uv run --group web pytest --cov=rentlens --cov-report=term-missing --cov-fail-under=90
+docker compose --profile observability config --quiet
+docker stats --no-stream
+```
+
+Полный pytest включает Testcontainers и требует доступного Docker. Набор без
+`tests/test_queue_integration.py` можно запускать без доступа к Docker daemon;
+он не заменяет интеграционный тест переполнения реального брокера.
+
+Полный прогон 15 ноября: **87 passed**, покрытие **92,59%** при требовании 90%;
+Ruff check и проверка форматирования 49 файлов прошли. Получено одно
+DeprecationWarning из Testcontainers про устаревающий декоратор ожидания.

@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -5,6 +6,11 @@ import pytest
 
 from rentlens import batch_source
 from rentlens.task_broker import QueueFull
+
+
+@pytest.fixture(autouse=True)
+def disable_network_telemetry(monkeypatch):
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
 
 
 @pytest.mark.asyncio
@@ -46,9 +52,18 @@ async def test_batch_source_retries_without_losing_tasks(monkeypatch, capsys):
 
     sleep.assert_awaited_once_with(0.1)
 
-    output = capsys.readouterr().out
-    assert "accepted=5/5" in output
-    assert "FINISHED accepted=5 rejected=1" in output
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    progress = next(row for row in records if row.get("event") == "batch_progress")
+    finished = next(row for row in records if row.get("event") == "batch_completed")
+    assert progress["accepted"] == progress["total"] == 5
+    assert finished["accepted"] == 5
+    assert finished["rejected"] == 1
+    assert finished["wait_seconds"] >= 0
+    assert all(
+        "batch_id" in row
+        for row in records
+        if row.get("event", "").startswith("batch_")
+    )
 
 
 @pytest.mark.asyncio
@@ -87,8 +102,14 @@ async def test_batch_source_exponential_backoff(monkeypatch, capsys):
 
     publisher.close.assert_awaited_once()
 
-    output = capsys.readouterr().out
-    assert "FINISHED accepted=1 rejected=7" in output
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    finished = next(row for row in records if row.get("event") == "batch_completed")
+    assert finished["accepted"] == 1
+    assert finished["rejected"] == 7
+    rejected = [row for row in records if row.get("event") == "source_backpressure"]
+    assert len(rejected) == 7
+    assert [row["publish_attempt"] for row in rejected] == list(range(1, 8))
+    assert len({row["task_id"] for row in rejected}) == 1
 
 
 @pytest.mark.asyncio
@@ -106,3 +127,83 @@ async def test_batch_source_closes_on_error(monkeypatch):
         await batch_source.main()
 
     publisher.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_each_task_has_own_trace_and_retries_keep_context(monkeypatch):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "false")
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("source-test")
+    published = []
+
+    async def publish(task_id, payload):
+        context = trace.get_current_span().get_span_context()
+        published.append((task_id, context.trace_id))
+        if len(published) <= 2:
+            raise QueueFull("Queue is full")
+
+    publisher = SimpleNamespace(
+        start=AsyncMock(),
+        publish=AsyncMock(side_effect=publish),
+        close=AsyncMock(),
+    )
+    monkeypatch.setenv("BATCH_COUNT", "3")
+    monkeypatch.setattr(batch_source, "TaskPublisher", lambda: publisher)
+    monkeypatch.setattr(batch_source, "asyncio", SimpleNamespace(sleep=AsyncMock()))
+    monkeypatch.setattr(batch_source, "configure_telemetry", lambda name: None)
+    monkeypatch.setattr(batch_source, "shutdown_telemetry", lambda: None)
+    monkeypatch.setattr(batch_source, "traced_span", tracer.start_as_current_span)
+
+    try:
+        with tracer.start_as_current_span("unrelated-parent"):
+            await batch_source.main()
+
+        spans = exporter.get_finished_spans()
+        roots = [span for span in spans if span.name == "source.task"]
+        waits = [span for span in spans if span.name == "source.wait"]
+
+        assert len(roots) == 3
+        assert all(span.parent is None for span in roots)
+        assert len({span.context.trace_id for span in roots}) == 3
+        assert len(waits) == 2
+        assert len({task_id for task_id, _ in published}) == 3
+        assert len({trace_id for _, trace_id in published[:3]}) == 1
+        assert len({trace_id for _, trace_id in published}) == 3
+        assert len({span.parent.span_id for span in waits}) == 1
+        assert (
+            sum(
+                event.name == "publish.rejected"
+                for span in roots
+                for event in span.events
+            )
+            == 2
+        )
+        publisher.close.assert_awaited_once()
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_batch_source_closes_on_startup_error(monkeypatch):
+    publisher = SimpleNamespace(
+        start=AsyncMock(side_effect=ConnectionError("Broker unavailable")),
+        publish=AsyncMock(),
+        close=AsyncMock(),
+    )
+    monkeypatch.setenv("BATCH_COUNT", "1")
+    monkeypatch.setattr(batch_source, "TaskPublisher", lambda: publisher)
+
+    with pytest.raises(ConnectionError, match="Broker unavailable"):
+        await batch_source.main()
+
+    publisher.close.assert_awaited_once()
+    publisher.publish.assert_not_awaited()
